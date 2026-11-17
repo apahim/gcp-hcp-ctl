@@ -122,7 +122,7 @@ func TestNewIAMCmd(t *testing.T) {
 		t.Errorf("expected Use to be %q, got %q", "iam", cmd.Use)
 	}
 
-	if len(cmd.Commands()) != 2 {
-		t.Errorf("expected 2 subcommands, got %d", len(cmd.Commands()))
+	if len(cmd.Commands()) != 3 {
+		t.Errorf("expected create/destroy/verify subcommands, got %d", len(cmd.Commands()))
 	}
 }
