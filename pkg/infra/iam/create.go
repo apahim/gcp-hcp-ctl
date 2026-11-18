@@ -3,6 +3,7 @@ package iam
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,6 +20,7 @@ import (
 )
 
 type CreateOptions struct {
+	StopAfterFirstRole  bool
 	Version             string
 	ChannelGroup        string
 	DryRun              bool
@@ -127,11 +129,14 @@ readback. Preview first with --dry-run; mutation requires --confirm,
 						authorityBlock = err.Error()
 					}
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"executable": executable, "authorityBlock": authorityBlock, "planFingerprint": p.Fingerprint(), "plan": p})
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"executable": executable, "authorityBlock": authorityBlock, "planFingerprint": p.Fingerprint(), "plan": p, "stopAfterFirstRole": opts.StopAfterFirstRole})
 			}
 			logger := logr.FromSlogHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 			result, err := opts.CreateIAM(cmd.Context(), logger)
 			if err != nil {
+				if errors.Is(err, application.ErrControlledStop) {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"paused": true, "iamVerified": false, "stoppedAfter": "first-unbound-role", "stateFile": opts.StateFile})
+				}
 				return err
 			}
 			if opts.OutputFile != "" {
@@ -151,6 +156,7 @@ readback. Preview first with --dry-run; mutation requires --confirm,
 	cmd.Flags().BoolVar(&opts.Resume, "resume", false, "Resume the same journaled operation")
 	cmd.Flags().StringVar(&opts.StateFile, "state-file", "", "Protected operation journal path")
 	cmd.Flags().StringVar(&opts.ExpectPlan, "expect-plan", "", "Expected fresh preview fingerprint")
+	cmd.Flags().BoolVar(&opts.StopAfterFirstRole, "stop-after-first-role", false, "Pause after one verified unbound custom role for owned cleanup rehearsal; emits no IAM success config")
 	_ = cmd.Flags().MarkDeprecated("oidc-jwks-file", "inline JWKS is unsupported; use the selected regional issuer")
 
 	return cmd
@@ -197,6 +203,7 @@ func (o *CreateOptions) CreateIAM(ctx context.Context, logger logr.Logger) (*Cre
 		return nil, err
 	}
 	defer session.Close()
+	session.Engine.StopAfterFirstRole = o.StopAfterFirstRole
 	if err := session.Apply(ctx); err != nil {
 		return nil, err
 	}

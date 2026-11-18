@@ -188,6 +188,45 @@ func TestReadOnlyInspectionAndBlockedTarget(t *testing.T) {
 		t.Fatal("unverified contract applied")
 	}
 }
+
+func TestControlledFirstRoleStopHasNoGrantsOrCoverageAndCanClean(t *testing.T) {
+	e, j, f, s := testEngine(t)
+	e.StopAfterFirstRole = true
+	if err := e.Apply(t.Context(), j); !errors.Is(err, ErrControlledStop) {
+		t.Fatalf("expected bounded stop: %v", err)
+	}
+	j = s.load(t)
+	if f.creates != 1 || f.writes != 1 || len(f.resources) != 2 || j.VerifiedAt != nil || j.Phase != "PausedAfterFirstRole" || len(j.Steps) != 1 {
+		t.Fatal("bounded rehearsal exceeded one unbound role or claimed coverage")
+	}
+	if err := e.Apply(t.Context(), j); !errors.Is(err, ErrControlledStop) {
+		t.Fatalf("same bounded resume did not pause: %v", err)
+	}
+	if f.creates != 1 || f.writes != 1 {
+		t.Fatal("bounded resume repeated a cloud mutation")
+	}
+	if err := e.Verify(t.Context(), &j.Plan, j); err == nil {
+		t.Fatal("partial rehearsal verified complete IAM")
+	}
+	if err := e.Cleanup(t.Context(), j, func(context.Context, *Journal) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.resources) != 1 || j.Phase != "Cleaned" {
+		t.Fatal("bounded rehearsal did not clean only its role")
+	}
+}
+
+func TestControlledStopCannotRelabelAnAdvancedOperation(t *testing.T) {
+	e, j, f, _ := testEngine(t)
+	if err := e.Apply(t.Context(), j); err != nil {
+		t.Fatal(err)
+	}
+	before := f.writes
+	e.StopAfterFirstRole = true
+	if err := e.Apply(t.Context(), j); err == nil || errors.Is(err, ErrControlledStop) || f.writes != before {
+		t.Fatal("advanced operation was mislabeled as a one-role rehearsal")
+	}
+}
 func TestApplyVerifyCASAndOwnedCleanup(t *testing.T) {
 	e, j, f, _ := testEngine(t)
 	f.conflicts = 1

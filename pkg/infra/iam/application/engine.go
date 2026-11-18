@@ -16,11 +16,15 @@ import (
 )
 
 type Engine struct {
-	Cloud   CloudReader
-	Store   JournalStore
-	Recheck func(context.Context) error
-	Pause   func(context.Context) error
+	// StopAfterFirstRole is a bounded cleanup rehearsal, never IAM coverage.
+	StopAfterFirstRole bool
+	Cloud              CloudReader
+	Store              JournalStore
+	Recheck            func(context.Context) error
+	Pause              func(context.Context) error
 }
+
+var ErrControlledStop = errors.New("operation paused after its first verified unbound role; IAM coverage is not verified")
 
 func (e *Engine) pause(ctx context.Context) error {
 	if e.Pause != nil {
@@ -199,6 +203,17 @@ func (e *Engine) Apply(ctx context.Context, j *Journal) error {
 	if err := j.validate(p); err != nil {
 		return err
 	}
+	if e.StopAfterFirstRole {
+		if len(p.Resources) == 0 || p.Resources[0].Kind != "Role" {
+			return fmt.Errorf("bounded role rehearsal requires a role-first plan")
+		}
+		first := resourceKey(p.Resources[0])
+		for key, step := range j.Steps {
+			if key != first && step.State != "Planned" {
+				return fmt.Errorf("bounded role rehearsal cannot resume an operation with other attempted work")
+			}
+		}
+	}
 	if j.Phase == "Cleaning" || j.Phase == "Cleaned" {
 		return fmt.Errorf("a cleanup operation cannot be reprovisioned")
 	}
@@ -327,6 +342,13 @@ func (e *Engine) Apply(ctx context.Context, j *Journal) error {
 		step.State = "Verified"
 		if err := e.Store.Save(j); err != nil {
 			return err
+		}
+		if e.StopAfterFirstRole {
+			j.Phase = "PausedAfterFirstRole"
+			if err := e.Store.Save(j); err != nil {
+				return err
+			}
+			return ErrControlledStop
 		}
 	}
 	for _, g := range p.Grants {
