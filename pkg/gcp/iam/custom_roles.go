@@ -2,6 +2,7 @@ package iam
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/api/iam/v1"
 )
@@ -44,13 +45,19 @@ func (c *Client) WaitOperation(ctx context.Context, name string) error {
 // CheckCustomPermissions is read-only; unsupported/unknown permissions are not
 // silently dropped or substituted with predefined roles.
 func (c *Client) CheckCustomPermissions(ctx context.Context, permissions []string) error {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
 	wanted := map[string]bool{}
 	for _, p := range permissions {
 		wanted[p] = false
 	}
-	err := c.iamService.Permissions.QueryTestablePermissions(&iam.QueryTestablePermissionsRequest{FullResourceName: "//cloudresourcemanager.googleapis.com/projects/" + c.ProjectID}).Pages(ctx, func(page *iam.QueryTestablePermissionsResponse) error {
+	err := c.iamService.Permissions.QueryTestablePermissions(&iam.QueryTestablePermissionsRequest{FullResourceName: "//cloudresourcemanager.googleapis.com/projects/" + c.ProjectID, PageSize: 1000}).Pages(ctx, func(page *iam.QueryTestablePermissionsResponse) error {
 		for _, p := range page.Permissions {
-			if _, ok := wanted[p.Name]; ok && (p.CustomRolesSupportLevel == "SUPPORTED" || p.CustomRolesSupportLevel == "TESTING") && !p.OnlyInPredefinedRoles {
+			// SUPPORTED is the protobuf enum's zero/default state and Google
+			// omits it in normal JSON responses. Empty is not unknown here.
+			// https://cloud.google.com/iam/docs/reference/rest/v1/permissions/queryTestablePermissions#CustomRolesSupportLevel
+			supported := p.CustomRolesSupportLevel == "" || p.CustomRolesSupportLevel == "SUPPORTED" || p.CustomRolesSupportLevel == "TESTING"
+			if _, ok := wanted[p.Name]; ok && supported && !p.OnlyInPredefinedRoles && !p.ApiDisabled {
 				wanted[p.Name] = true
 			}
 		}
