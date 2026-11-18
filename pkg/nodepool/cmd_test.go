@@ -462,6 +462,18 @@ func executeNodepoolError(t *testing.T, code int, body string, args ...string) (
 	return err, stdout.String(), stderr.String()
 }
 
+func TestNodePoolGetPreservesPublicIAMRequirements(t *testing.T) {
+	body := `{"apiVersion":"gcp.managed.openshift.io/v1","kind":"NodePool","metadata":{"name":"workers","uid":"pool-uid","generation":1},"status":{"iamDispatch":{"private":true},"iamRequirements":{"state":"Incomplete","observedGeneration":1,"objectUID":"pool-uid","clusterUID":"cluster-uid","pending":{"releaseVersion":"5.0.3","releaseImage":"quay.io/example/release@sha256:abc","channelGroup":"candidate","templateRef":{"name":"5.0.3","uid":"target-template-uid","digest":"sha256:abc"}}}}}`
+	for _, format := range []string{"json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			err, out, _ := executeNodepoolError(t, http.StatusOK, body, "get", "workers", "-o", format)
+			if err != nil || !strings.Contains(out, "iamRequirements") || !strings.Contains(out, "target-template-uid") || strings.Contains(out, "iamDispatch") {
+				t.Fatalf("public readback lost pending IAM requirement or leaked private dispatch: %s (%v)", out, err)
+			}
+		})
+	}
+}
+
 func TestNodepoolCommandErrorBoundary(t *testing.T) {
 	const secrets = `Bearer synthetic-token Authorization: Bearer synthetic-token alice@example.invalid https://user:password@example.invalid/?token=synthetic-token`
 	for _, tc := range []struct {

@@ -364,6 +364,18 @@ func executeClusterTestCommand(t *testing.T, client *platformapi.Client, ctx con
 	return err, stdout.String(), stderr.String()
 }
 
+func TestClusterGetPreservesPublicIAMRequirements(t *testing.T) {
+	client := clusterTestClient(t, http.StatusOK, `{"apiVersion":"gcp.managed.openshift.io/v1","kind":"Cluster","metadata":{"name":"wif3-first","uid":"cluster-uid","generation":2},"spec":{"release":{"version":"5.0.2"}},"status":{"iamDispatch":{"private":true},"iamRequirements":{"state":"Complete","observedGeneration":2,"objectUID":"cluster-uid","clusterUID":"cluster-uid","lastRefreshTime":"2026-11-18T12:40:00Z","dispatched":{"releaseVersion":"5.0.2","releaseImage":"quay.io/example/release@sha256:abc","channelGroup":"candidate","templateRef":{"name":"5.0.0","uid":"template-uid","digest":"sha256:abc"}}}}}`)
+	for _, format := range []string{"json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			err, out, _ := executeClusterTestCommand(t, client, context.Background(), "get", "wif3-first", "-o", format)
+			if err != nil || !strings.Contains(out, "iamRequirements") || !strings.Contains(out, "template-uid") || strings.Contains(out, "iamDispatch") {
+				t.Fatalf("public readback lost the exact requirement or leaked private dispatch: %s (%v)", out, err)
+			}
+		})
+	}
+}
+
 func assertSafeClusterError(t *testing.T, err error, stdout, stderr, want string) {
 	t.Helper()
 	if err == nil || err.Error() != want {
