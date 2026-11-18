@@ -28,6 +28,31 @@ JSON/YAML return API resources without managed fields; the computed digest appea
 in text output only, not as an extra API field. These commands never change
 template verification or Cluster application history.
 
+### Existing-Cluster IAM update preview (Phase 4 code-first)
+
+`gcphcpctl iam update <cluster-name> --version <exact-release>
+--channel-group <group> --installation-state <protected-primary-journal>
+--dry-run` is **read-only**. It cannot apply a role update or append a Cluster
+application, and no confirmation or write flag is available. It requires the
+original confirmed installation journal, complete fresh Cluster/NodePool IAM
+requirements, a full NodePool list and independently matching original cloud
+IAM. It rejects deleting resources, changed ownership, stale status or missing
+contracts. It also re-reads the object inventory and target catalog after
+cloud verification to detect races during preview.
+
+The preview retains **every** append-only Cluster application contract as a
+conservative upper bound, including unverified historical entries; a Pending
+receipt cannot exist without the corresponding Cluster application assertion.
+It only proposes additions to existing custom-role permission sets when all
+identities, bindings and federation trust remain identical. `targetEligibleForNewUse`
+and `targetBlock` describe catalog eligibility, not permission to execute the
+preview's `planFingerprint`. Even a target-eligible preview is **not** an
+apply-ready plan. A separately reviewed update journal, executor, recovery and
+multi-contract cleanup are required before introducing any write path. Historic
+Versions may age out of the catalog; this initial preview still requires the
+original journal's Version UID to exist to confirm the API realm and fails
+closed if it cannot be read.
+
 Use explicitly approved project, region and discovery/API/OIDC settings. Examples
 describe the new interface; placeholder values are not permission to mutate cloud.
 
