@@ -214,8 +214,21 @@ func (c *GCP) Create(ctx context.Context, r Resource) (*Resource, error) {
 }
 
 func (c *GCP) StartCreate(ctx context.Context, r Resource) (string, error) {
-	last := r.Name[strings.LastIndex(r.Name, "/")+1:]
-	parent := r.Name[:strings.LastIndex(r.Name, "/")]
+	// SDK Create methods append the collection themselves: parent must be the
+	// containing location (pool) or pool resource (provider), not its collection.
+	var collection string
+	switch r.Kind {
+	case "Pool":
+		collection = "/workloadIdentityPools/"
+	case "Provider":
+		collection = "/providers/"
+	default:
+		return "", fmt.Errorf("unsupported asynchronous resource")
+	}
+	parent, last, found := strings.Cut(r.Name, collection)
+	if !found || parent == "" || last == "" || strings.Contains(last, "/") {
+		return "", fmt.Errorf("invalid federation resource name")
+	}
 	var name string
 	var err error
 	switch r.Kind {
