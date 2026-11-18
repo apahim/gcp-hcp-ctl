@@ -18,6 +18,16 @@ is not removed here. No server entry point or private RPC client is introduced.
 
 ## Workflow
 
+### Inspecting the catalog (read-only)
+
+`gcphcpctl wifconfigtemplate list` shows template boundaries, verification state
+and the canonical contract digest. `gcphcpctl wifconfigtemplate get 5.0.0 -o yaml`
+shows the full public IAM contract. Both use the authenticated regional platform
+API and require the usual project/region or explicit API endpoint configuration.
+JSON/YAML return API resources without managed fields; the computed digest appears
+in text output only, not as an extra API field. These commands never change
+template verification or Cluster application history.
+
 Use explicitly approved project, region and discovery/API/OIDC settings. Examples
 describe the new interface; placeholder values are not permission to mutate cloud.
 
