@@ -4,6 +4,30 @@ CLI for managing GCP Hosted Control Plane (HCP) clusters.
 
 Part of the [GCP HCP](https://github.com/openshift-online/gcp-hcp) project. See [design decisions](https://github.com/openshift-online/gcp-hcp/tree/main/design-decisions) for architectural context.
 
+## Installation
+
+Download the latest release for your platform, verify it against `SHA256SUMS`,
+and put `gcphcpctl` on your `PATH`:
+
+```bash
+BASE=https://github.com/openshift-online/gcp-hcp-ctl/releases/latest/download
+PLATFORM=linux_amd64   # linux_amd64, linux_arm64, darwin_amd64, or darwin_arm64
+
+curl -LO "$BASE/gcphcpctl_${PLATFORM}.tar.gz" "$BASE/SHA256SUMS"
+
+# Verify the download:
+sha256sum --ignore-missing --check SHA256SUMS    # Linux
+shasum -a 256 "gcphcpctl_${PLATFORM}.tar.gz"     # macOS: compare with the matching line in SHA256SUMS
+
+tar -xzf "gcphcpctl_${PLATFORM}.tar.gz"
+sudo mv gcphcpctl /usr/local/bin/
+gcphcpctl version
+```
+
+Every release publishes `gcphcpctl_<os>_<arch>.tar.gz` for `linux/amd64`,
+`linux/arm64`, `darwin/amd64`, and `darwin/arm64`, plus a `SHA256SUMS` file
+covering all four. Alternatively, build from source with `make build`.
+
 ## Quick Start
 
 ```bash
@@ -498,6 +522,30 @@ make clean    # Remove build artifacts
   With user ADC or no ADC, they instead use the active gcloud session; run
   `gcloud auth login` if needed. ADC login alone does not establish that session.
 - Cloud Workflows deployed in the target project/region
+
+### Releasing
+
+Releases are published automatically when a `vX.Y.Z` tag is pushed to this
+repository.
+
+1. Make sure the changes you want to ship are merged to `main`.
+2. Tag the release and push the tag to this repository:
+   ```bash
+   git tag -a v0.2.0 -m "Release v0.2.0"
+   git push <remote> v0.2.0   # the remote for openshift-online/gcp-hcp-ctl; `make release v=0.2.0` tags and pushes to origin
+   ```
+3. The [publish-release workflow](.github/workflows/publish-release.yaml) runs
+   the unit tests, cross-compiles `gcphcpctl` for `linux/amd64`,
+   `linux/arm64`, `darwin/amd64`, and `darwin/arm64`, and creates a GitHub
+   Release with the tarballs, `SHA256SUMS`, and auto-generated notes from
+   merged pull requests.
+4. Verify the result: the [Actions](https://github.com/openshift-online/gcp-hcp-ctl/actions)
+   run is green, the release page shows five assets, and a downloaded binary
+   reports the release version via `gcphcpctl version`.
+
+The publish job is safe to re-run: it creates the release only if it does not
+already exist and re-uploads the assets. Version numbers follow semantic
+versioning with a `v` prefix.
 
 ## Architecture
 

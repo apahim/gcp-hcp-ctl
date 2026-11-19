@@ -1,7 +1,7 @@
 // Standalone entry point for the ops plugin (gcphcpctl-ops).
 // This can be built and distributed independently of the main gcphcpctl binary.
 //
-// Build with: make build-ops
+// Build with: go build ./cmd/ops
 package main
 
 import (

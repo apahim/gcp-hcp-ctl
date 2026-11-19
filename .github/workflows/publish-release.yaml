@@ -1,0 +1,49 @@
+# Publishes gcphcpctl release binaries when a vX.Y.Z tag is pushed.
+#
+# The unit tests run first, then the CLI is cross-compiled for linux/amd64,
+# linux/arm64, darwin/amd64, and darwin/arm64 by `make release-artifacts`.
+# The tarballs and a SHA256SUMS file are attached to a GitHub Release with
+# notes auto-generated from merged pull requests.
+#
+# See the "Releasing" section in README.md.
+
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the source
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build release artifacts
+        run: make release-artifacts VERSION=${GITHUB_REF_NAME}
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "Release ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
