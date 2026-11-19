@@ -19,6 +19,12 @@ func (c *Client) CreateCustomRole(ctx context.Context, id string, role *iam.Role
 func (c *Client) UpdateCustomRole(ctx context.Context, name string, role *iam.Role) (*iam.Role, error) {
 	return c.iamService.Projects.Roles.Patch(name, role).UpdateMask("includedPermissions,description,title,stage").Context(ctx).Do()
 }
+
+// UpdateCustomRolePermissions preserves title, description/ownership and stage.
+// The service enforces the role's optimistic etag; callers must read it freshly.
+func (c *Client) UpdateCustomRolePermissions(ctx context.Context, name, etag string, permissions []string) (*iam.Role, error) {
+	return c.iamService.Projects.Roles.Patch(name, &iam.Role{Etag: etag, IncludedPermissions: permissions}).UpdateMask("includedPermissions").Context(ctx).Do()
+}
 func (c *Client) DeleteCustomRole(ctx context.Context, name, etag string) error {
 	_, err := c.iamService.Projects.Roles.Delete(name).Etag(etag).Context(ctx).Do()
 	return err

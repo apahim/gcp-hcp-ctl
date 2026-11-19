@@ -17,16 +17,61 @@ type fakeOwnedCleaner struct {
 	*fakeOwnedCloud
 	deleted []string
 	file    *application.FileJournal
+	linked  *application.UpdateFile
 }
 
 func (f *fakeOwnedCleaner) StartDelete(_ context.Context, _ OwnedPlan, kind string) (string, error) {
 	j, err := application.Load(f.file.Path)
-	if err != nil || j.Steps["network/"+kind].State != "Deleting" {
+	if f.linked != nil {
+		var state *application.UpdateJournal
+		state, err = application.LoadUpdates(f.linked.Primary.Path, f.linked.Primary.Journal)
+		if state != nil {
+			j = state.Cleanup
+		}
+	}
+	if err != nil || j == nil || j.Steps["network/"+kind].State != "Deleting" {
 		return "", fmt.Errorf("delete preceded durable intent")
 	}
 	f.deleted = append(f.deleted, kind)
 	delete(f.resources, kind)
 	return "delete-" + kind, nil
+}
+
+func TestLinkedNetworkCleanupPersistsSidecarNotOriginal(t *testing.T) {
+	p, primary := networkJournal(t)
+	cloud := &fakeOwnedCleaner{fakeOwnedCloud: &fakeOwnedCloud{resources: map[string]*Observed{}}, file: primary}
+	for _, kind := range p.Kinds() {
+		id := "owned-" + kind
+		cloud.resources[kind] = &Observed{ID: id, Owner: primary.Journal.Owner(), Matches: true}
+		primary.Journal.Steps["network/"+kind] = &application.Step{State: "Verified", Resource: &application.Resource{Name: p.Name(kind), Kind: kind, UID: id, Operation: "create-" + kind}}
+	}
+	if err := primary.Save(primary.Journal); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(primary.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := primary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := application.OpenUpdates(primary.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer linked.Close()
+	cloud.linked = linked
+	if err := CleanupOwned(t.Context(), cloud, p, linked, func(context.Context, *application.Journal) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(primary.Path)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("linked network teardown rewrote original ownership journal")
+	}
+	state, err := application.LoadUpdates(primary.Path, linked.Primary.Journal)
+	if err != nil || state.Cleanup == nil || state.Cleanup.Steps["network/Network"].State != "Deleted" {
+		t.Fatalf("linked cleanup progress not durable: %v", err)
+	}
 }
 
 func networkJournal(t *testing.T) (OwnedPlan, *application.FileJournal) {

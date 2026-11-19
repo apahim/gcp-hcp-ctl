@@ -123,6 +123,10 @@ func Load(path string) (*Journal, error) {
 }
 
 func Open(path string, p *Plan, resume bool) (*FileJournal, error) {
+	return openJournal(path, p, resume, false)
+}
+
+func openJournal(path string, p *Plan, resume, linked bool) (*FileJournal, error) {
 	if path == "" {
 		return nil, fmt.Errorf("--state-file is required")
 	}
@@ -171,6 +175,11 @@ func Open(path string, p *Plan, resume bool) (*FileJournal, error) {
 	}
 	f := &FileJournal{Path: abs, lock: lock}
 	fail := func(err error) (*FileJournal, error) { f.Close(); return nil, err }
+	if !linked {
+		if _, err := os.Lstat(UpdateStatePath(abs)); err == nil || !os.IsNotExist(err) {
+			return fail(fmt.Errorf("installation has a linked IAM update journal; use update-aware commands"))
+		}
+	}
 	if resume {
 		j, err := Load(abs)
 		if errors.Is(err, ErrOrphanJournal) {
@@ -215,7 +224,14 @@ func (f *FileJournal) Save(j *Journal) error {
 	if err != nil {
 		return fmt.Errorf("cannot encode operation journal")
 	}
-	dir := filepath.Dir(f.Path)
+	return atomicPrivateSave(f.Path, data)
+}
+
+func atomicPrivateSave(path string, data []byte) error {
+	if err := privateFile(path); err != nil {
+		return fmt.Errorf("journal file protection changed")
+	}
+	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".gcphcpctl-state-")
 	if err != nil {
 		return fmt.Errorf("cannot prepare journal update")
@@ -229,7 +245,7 @@ func (f *FileJournal) Save(j *Journal) error {
 	if err != nil || closeErr != nil {
 		return fmt.Errorf("cannot persist journal update")
 	}
-	if err := os.Rename(name, f.Path); err != nil {
+	if err := os.Rename(name, path); err != nil {
 		return fmt.Errorf("cannot replace journal atomically")
 	}
 	d, err := os.Open(dir)

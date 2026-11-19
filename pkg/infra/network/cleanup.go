@@ -19,8 +19,11 @@ func (c *OwnedGCP) StartDelete(ctx context.Context, p OwnedPlan, kind string) (s
 // CleanupOwned is used only after the caller has proved hosted teardown and
 // absence of cloud dependants. Explicit external networks are never deleted.
 // Compute deletes have no numeric-ID CAS: the re-GET narrows, not closes, races.
-func CleanupOwned(ctx context.Context, c OwnedCleaner, p OwnedPlan, file *application.FileJournal, proofs ...func(context.Context, *application.Journal) error) error {
-	j := file.Journal
+func CleanupOwned(ctx context.Context, c OwnedCleaner, p OwnedPlan, file interface {
+	CurrentJournal() *application.Journal
+	Save(*application.Journal) error
+}, proofs ...func(context.Context, *application.Journal) error) error {
+	j := file.CurrentJournal()
 	if len(proofs) != 1 || proofs[0] == nil {
 		return fmt.Errorf("independent hosted teardown proof is required")
 	}

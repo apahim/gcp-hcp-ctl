@@ -16,7 +16,8 @@ func TestUpdateCommandFailsClosedBeforeCloudAccess(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no dry run", []string{"owned", "--version=5.0.1", "--channel-group=candidate", "--installation-state=journal.json"}, "mutation is not available"},
+		{"no confirmation", []string{"owned", "--version=5.0.1", "--channel-group=candidate", "--installation-state=journal.json"}, "choose --dry-run or --confirm"},
+		{"confirm without fingerprint", []string{"owned", "--confirm", "--version=5.0.1", "--channel-group=candidate", "--installation-state=journal.json"}, "--expect-plan"},
 		{"missing target", []string{"owned", "--dry-run", "--channel-group=candidate", "--installation-state=journal.json"}, "--version"},
 		{"missing group", []string{"owned", "--dry-run", "--version=5.0.1", "--installation-state=journal.json"}, "--channel-group"},
 		{"missing journal", []string{"owned", "--dry-run", "--version=5.0.1", "--channel-group=candidate"}, "--installation-state"},
@@ -44,9 +45,9 @@ func TestUpdateCommandFailsClosedBeforeCloudAccess(t *testing.T) {
 	}
 }
 
-func TestUpdateCommandHasNoWriteFlags(t *testing.T) {
+func TestUpdateCommandHasNoBroadBypassFlags(t *testing.T) {
 	cmd := newUpdateCommand(&config.Config{})
-	for _, flag := range []string{"confirm", "yes", "expect-plan", "resume", "update-state"} {
+	for _, flag := range []string{"yes", "force", "skip-verify", "update-state"} {
 		if cmd.Flags().Lookup(flag) != nil {
 			t.Fatalf("unimplemented IAM mutation flag %q is exposed", flag)
 		}

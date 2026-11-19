@@ -82,7 +82,19 @@ worker account are never deleted; unrelated policy members are preserved.`,
 					}
 				}
 				proof := opts.proof(cloud)
-				checkErr := (&application.Engine{Cloud: cloud}).CheckCleanup(cmd.Context(), j, proof)
+				updates, err := application.LoadUpdates(opts.StateFile, j)
+				if err != nil {
+					return err
+				}
+				engine, err := application.NewLinkedCleanupEngine(cloud, j, updates, nil)
+				if err != nil {
+					return err
+				}
+				checkJournal := j
+				if updates != nil && updates.Cleanup != nil {
+					checkJournal = updates.Cleanup
+				}
+				checkErr := engine.CheckCleanup(cmd.Context(), checkJournal, proof)
 				if checkErr == nil && j.NetworkFingerprint != "" && !j.NetworkExternal && !opts.IncludeOwnedNetwork {
 					checkErr = fmt.Errorf("owned network teardown requires explicit --include-owned-network")
 				}
@@ -90,7 +102,7 @@ worker account are never deleted; unrelated policy members are preserved.`,
 				if checkErr != nil {
 					block = checkErr.Error()
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"operationID": j.OperationID, "phase": j.Phase, "cleanupEligible": checkErr == nil, "block": block, "includeOwnedNetwork": opts.IncludeOwnedNetwork, "resources": j.Plan.Resources, "grants": j.Plan.Grants})
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"operationID": j.OperationID, "phase": checkJournal.Phase, "cleanupEligible": checkErr == nil, "block": block, "includeOwnedNetwork": opts.IncludeOwnedNetwork, "resources": j.Plan.Resources, "grants": j.Plan.Grants})
 			}
 			if opts.IncludeOwnedNetwork && !opts.SkipConfirm {
 				return fmt.Errorf("owned-network cleanup requires --yes after reviewing --dry-run")
@@ -151,22 +163,35 @@ func (o *DestroyOptions) DestroyIAM(ctx context.Context, logger logr.Logger) err
 			return err
 		}
 	}
-	file, err := application.Open(o.StateFile, &j.Plan, true)
+	linked, err := application.OpenUpdates(o.StateFile)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	engine := &application.Engine{Cloud: cloud, Store: file}
-	proof := o.proof(cloud)
-	if err := engine.CheckCleanup(ctx, file.Journal, proof); err != nil {
+	defer linked.Close()
+	type cleanupState interface {
+		CurrentJournal() *application.Journal
+		Save(*application.Journal) error
+	}
+	var file cleanupState = linked.Primary
+	var updates *application.UpdateJournal
+	if len(linked.State.Operations) > 0 || linked.State.Cleanup != nil {
+		file, updates = linked, linked.State
+	}
+	engine, err := application.NewLinkedCleanupEngine(cloud, linked.Primary.Journal, updates, file)
+	if err != nil {
 		return err
 	}
-	if file.Journal.NetworkFingerprint != "" && !file.Journal.NetworkExternal {
+	owned := file.CurrentJournal()
+	proof := o.proof(cloud)
+	if err := engine.CheckCleanup(ctx, owned, proof); err != nil {
+		return err
+	}
+	if owned.NetworkFingerprint != "" && !owned.NetworkExternal {
 		if !o.IncludeOwnedNetwork {
 			return fmt.Errorf("journaled network teardown must be explicitly requested with --include-owned-network")
 		}
 		var plan network.OwnedPlan
-		if err := json.Unmarshal(file.Journal.NetworkSpec, &plan); err != nil {
+		if err := json.Unmarshal(owned.NetworkSpec, &plan); err != nil {
 			return fmt.Errorf("invalid network cleanup state")
 		}
 		nc, err := network.NewOwnedGCP(ctx, plan)
@@ -177,7 +202,7 @@ func (o *DestroyOptions) DestroyIAM(ctx context.Context, logger logr.Logger) err
 			return err
 		}
 	}
-	return engine.Cleanup(ctx, file.Journal, proof)
+	return engine.Cleanup(ctx, owned, proof)
 }
 
 func (o *DestroyOptions) proof(cloud application.Cloud) func(context.Context, *application.Journal) error {

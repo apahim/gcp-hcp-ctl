@@ -33,6 +33,9 @@ type updateFixture struct {
 	mutateSecondPool    bool
 	targetReads         int
 	mutateSecondTarget  bool
+	patchFailure        int
+	patchLost           bool
+	archivedTemplates   map[string]*v1.WIFConfigTemplate
 }
 
 func newUpdateFixture(t *testing.T) *updateFixture {
@@ -41,22 +44,72 @@ func newUpdateFixture(t *testing.T) *updateFixture {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			f.writes++
-			w.WriteHeader(http.StatusMethodNotAllowed)
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodPatch || f.patchFailure != 0 {
+				code := f.patchFailure
+				if code == 0 {
+					code = http.StatusMethodNotAllowed
+				}
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden"}`))
+				return
+			}
+			var patch []struct {
+				Op, Path string
+				Value    json.RawMessage
+			}
+			if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+				t.Errorf("decode assertion patch: %v", err)
+				w.WriteHeader(400)
+				return
+			}
+			if r.Header.Get("Content-Type") != "application/json-patch+json" || len(patch) != 3 || patch[0].Op != "test" || patch[0].Path != "/metadata/uid" || patch[1].Op != "test" || patch[1].Path != "/metadata/resourceVersion" || patch[2].Op != "replace" || patch[2].Path != "/spec/platform/gcp/iam/templateApplications" {
+				t.Error("assertion patch did not restrict field and test UID/RV")
+				w.WriteHeader(400)
+				return
+			}
+			var uid, rv string
+			_ = json.Unmarshal(patch[0].Value, &uid)
+			_ = json.Unmarshal(patch[1].Value, &rv)
+			if rv != f.cluster.ResourceVersion || uid != string(f.cluster.UID) {
+				w.WriteHeader(409)
+				return
+			}
+			if err := json.Unmarshal(patch[2].Value, &f.cluster.Spec.Platform.GCP.IAM.TemplateApplications); err != nil {
+				t.Error(err)
+				w.WriteHeader(400)
+				return
+			}
+			f.cluster.Generation++
+			f.cluster.ResourceVersion = "after-assertion"
+			f.cluster.Status.IAMRequirements.ObservedGeneration = f.cluster.Generation
+			if f.patchLost {
+				f.patchLost = false
+				w.WriteHeader(503)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(f.cluster)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if item := f.archivedTemplates[r.URL.Path]; item != nil {
+			_ = json.NewEncoder(w).Encode(item)
+			return
+		}
 		var obj any
 		switch r.URL.Path {
 		case "/apis/gcp.managed.openshift.io/v1/namespaces/test-project/clusters/owned":
 			f.clusterReads++
 			if f.mutateSecondCluster && f.clusterReads == 2 {
 				f.cluster.ResourceVersion = "12"
+				f.cluster.Generation++
 			}
 			obj = f.cluster
 		case "/apis/gcp.managed.openshift.io/v1/namespaces/test-project/nodepools":
 			f.poolReads++
 			if f.mutateSecondPool && f.poolReads == 2 {
 				f.pools.Items[0].ResourceVersion = "6"
+				f.pools.Items[0].Generation++
 			}
 			obj = f.pools
 		case "/apis/gcp.managed.openshift.io/v1/versions/" + f.old.Name:

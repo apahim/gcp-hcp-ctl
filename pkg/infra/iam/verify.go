@@ -45,10 +45,35 @@ func newVerifyCommand(effective *config.Config) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if err := (&application.Engine{Cloud: cloud}).Verify(cmd.Context(), &j.Plan, j); err != nil {
+		updates, err := application.LoadUpdates(stateFile, j)
+		if err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"cloudReadbackMatches": true, "eligibleForNewUse": target.Eligible() == nil, "operationID": j.OperationID, "templateRef": target.Reference})
+		if updates != nil && updates.Cleanup != nil {
+			return fmt.Errorf("installation cleanup has started; use destroy --dry-run to inspect progress")
+		}
+		if err := application.VerifyLinked(cmd.Context(), cloud, j, updates); err != nil {
+			return err
+		}
+		complete := true
+		phase := "NoUpdates"
+		ref := target.Reference
+		eligible := target.Eligible() == nil
+		if updates != nil {
+			for i := len(updates.Operations) - 1; i >= 0; i-- {
+				op := updates.Operations[i]
+				if op.Phase == "Abandoned" {
+					continue
+				}
+				phase = op.Phase
+				complete = op.Phase == "Recorded"
+				ref = op.Intent.Retention.Target.Reference
+				current, err := application.Resolve(cmd.Context(), client, op.Intent.Retention.Target.Version, op.Intent.Retention.Target.ChannelGroup)
+				eligible = err == nil && current.Reference == ref && current.Eligible() == nil
+				break
+			}
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"cloudReadbackMatches": true, "updateComplete": complete, "updatePhase": phase, "eligibleForNewUse": eligible, "operationID": j.OperationID, "templateRef": ref})
 	}}
 	cmd.Flags().StringVar(&stateFile, "state-file", "", "Protected operation journal (required)")
 	return cmd

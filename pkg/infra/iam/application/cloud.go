@@ -34,6 +34,40 @@ type Cloud interface {
 	CloudWriter
 }
 
+// RolePermissionWriter cannot create resources or change bindings or trust.
+type RolePermissionWriter interface {
+	UpdateRolePermissions(context.Context, Resource) error
+	CheckRoleUpdateAuthority(context.Context) error
+}
+
+func (c *GCP) CheckRoleUpdateAuthority(ctx context.Context) error {
+	return cloudError(c.Client.TestPermissions(ctx, []string{"iam.roles.get", "iam.roles.update"}))
+}
+
+func (c *GCP) UpdateRolePermissions(ctx context.Context, desired Resource) error {
+	if desired.Kind != "Role" || desired.UID == "" || desired.Owner == "" || len(desired.Permissions) == 0 || len(desired.Permissions) > 512 {
+		return fmt.Errorf("owned role and fresh etag are required")
+	}
+	got, err := c.Get(ctx, desired)
+	if err != nil {
+		return err
+	}
+	if got.Owner != desired.Owner || got.UID != desired.UID || got.Stage != desired.Stage || got.Disabled || got.Deleted {
+		return fmt.Errorf("role ownership or etag changed before permission update")
+	}
+	for _, permission := range got.Permissions {
+		found := false
+		for _, keep := range desired.Permissions {
+			found = found || permission == keep
+		}
+		if !found {
+			return fmt.Errorf("role update cannot remove an existing permission")
+		}
+	}
+	_, err = c.Client.UpdateCustomRolePermissions(ctx, desired.Name, desired.UID, desired.Permissions)
+	return cloudError(err)
+}
+
 type AsyncCloud interface {
 	StartCreate(context.Context, Resource) (string, error)
 	WaitCreate(context.Context, string) error

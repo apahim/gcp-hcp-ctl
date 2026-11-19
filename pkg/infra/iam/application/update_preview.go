@@ -21,6 +21,8 @@ var wifDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // UpdatePreview is a read-only, conservative proposal. It is not an executable
 // Plan or a cloud attestation. The source journal is never changed by PreviewUpdate.
 type UpdatePreview struct {
+	PayloadCatalogBinding  string            `json:"payloadCatalogBinding"`
+	ClusterSpecDigest      string            `json:"clusterSpecDigest"`
 	ClusterUID             string            `json:"clusterUID"`
 	ClusterResourceVersion string            `json:"clusterResourceVersion"`
 	NodePoolListVersion    string            `json:"nodePoolListVersion"`
@@ -34,6 +36,7 @@ type UpdatePreview struct {
 }
 
 type UpdateNodePool struct {
+	SpecDigest      string `json:"specDigest"`
 	Name            string `json:"name"`
 	UID             string `json:"uid"`
 	ResourceVersion string `json:"resourceVersion"`
@@ -71,6 +74,7 @@ func PreviewUpdate(ctx context.Context, c *platformapi.Client, cloud CloudReader
 		return nil, fmt.Errorf("NodePool inventory is paginated; refusing an incomplete view")
 	}
 	out := &UpdatePreview{ClusterUID: string(current.UID), ClusterResourceVersion: current.ResourceVersion, NodePoolListVersion: list.ResourceVersion}
+	out.ClusterSpecDigest = digestJSON(current.Spec)
 	seenPools := make(map[string]bool, len(list.Items))
 	for i := range list.Items {
 		p := &list.Items[i]
@@ -87,7 +91,7 @@ func PreviewUpdate(ctx context.Context, c *platformapi.Client, cloud CloudReader
 		if err := checkRequirements(p.Status.IAMRequirements, string(p.UID), string(current.UID), p.Generation, now); err != nil {
 			return nil, fmt.Errorf("NodePool %q IAM requirements: %w", p.Name, err)
 		}
-		out.NodePools = append(out.NodePools, UpdateNodePool{Name: p.Name, UID: string(p.UID), ResourceVersion: p.ResourceVersion, Generation: p.Generation})
+		out.NodePools = append(out.NodePools, UpdateNodePool{Name: p.Name, UID: string(p.UID), ResourceVersion: p.ResourceVersion, Generation: p.Generation, SpecDigest: digestJSON(p.Spec)})
 	}
 	slices.SortFunc(out.NodePools, func(a, b UpdateNodePool) int { return compareNames(a.Name, b.Name) })
 	history := current.Spec.Platform.GCP.IAM.TemplateApplications
@@ -115,6 +119,19 @@ func PreviewUpdate(ctx context.Context, c *platformapi.Client, cloud CloudReader
 	if err != nil {
 		return nil, fmt.Errorf("resolving exact update target: %w", err)
 	}
+	for _, ref := range history {
+		if ref.Name == target.Reference.Name && ref != target.Reference {
+			return nil, fmt.Errorf("target conflicts with a retained template name")
+		}
+	}
+	v, err := c.Versions().Get(ctx, version)
+	if err != nil || string(v.UID) != target.VersionUID || v.Generation != target.VersionGeneration {
+		return nil, fmt.Errorf("target release payload is not pinned")
+	}
+	// ReleaseImage is private. A Version spec edit, including a payload edit,
+	// increments generation, so UID+generation binds the hidden payload without
+	// adding a second public catalog or claiming registry/image attestation.
+	out.PayloadCatalogBinding = digestJSON([]any{target.VersionUID, target.VersionGeneration})
 	proposed, err := Build(target, base.Plan.Identity)
 	if err != nil {
 		return nil, err
@@ -163,6 +180,10 @@ func PreviewUpdate(ctx context.Context, c *platformapi.Client, cloud CloudReader
 	if err != nil || latestTarget.VersionUID != target.VersionUID || latestTarget.VersionGeneration != target.VersionGeneration || latestTarget.Reference != target.Reference || latestTarget.Block != target.Block {
 		return nil, fmt.Errorf("target catalog eligibility or identity changed during IAM preview")
 	}
+	latestVersion, err := c.Versions().Get(ctx, version)
+	if err != nil || string(latestVersion.UID) != target.VersionUID || latestVersion.Generation != target.VersionGeneration {
+		return nil, fmt.Errorf("target release payload changed during IAM preview")
+	}
 	out.Retention = combined
 	out.NewApplication = !slices.Contains(history, target.Reference)
 	out.TargetEligible = target.Eligible() == nil
@@ -188,13 +209,7 @@ func PreviewUpdate(ctx context.Context, c *platformapi.Client, cloud CloudReader
 			out.RoleAdditions = append(out.RoleAdditions, Resource{Kind: "Role", Name: desired.Name, Permissions: additions})
 		}
 	}
-	fingerprint := *out
-	fingerprint.PlanFingerprint = ""
-	data, err := json.Marshal(fingerprint)
-	if err != nil {
-		return nil, fmt.Errorf("cannot fingerprint update preview")
-	}
-	out.PlanFingerprint = fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+	out.PlanFingerprint = previewFingerprint(*out)
 	return out, nil
 }
 
@@ -207,23 +222,61 @@ func recheckUpdateSnapshot(ctx context.Context, c *platformapi.Client, original 
 	if err != nil {
 		return fmt.Errorf("re-reading NodePool inventory: %w", err)
 	}
-	if fresh.UID != original.UID || fresh.ResourceVersion != original.ResourceVersion || updated.ResourceVersion != pools.ResourceVersion || updated.Continue != "" || len(updated.Items) != len(pools.Items) {
+	if fresh.UID != original.UID || fresh.Generation != original.Generation || !reflect.DeepEqual(fresh.Spec, original.Spec) || !fresh.DeletionTimestamp.IsZero() || updated.Continue != "" || updated.ResourceVersion == "" || updated.RemainingItemCount != nil && *updated.RemainingItemCount > 0 {
 		return fmt.Errorf("Cluster or NodePool inventory changed during IAM preview")
+	}
+	if err := checkRequirements(fresh.Status.IAMRequirements, string(fresh.UID), string(fresh.UID), fresh.Generation, time.Now().UTC()); err != nil {
+		return err
 	}
 	byName := make(map[string]v1.NodePool, len(pools.Items))
 	for _, p := range pools.Items {
+		if p.Spec.ClusterID != original.Name {
+			continue
+		}
 		if _, found := byName[p.Name]; found {
 			return fmt.Errorf("NodePool inventory contains duplicate names")
 		}
 		byName[p.Name] = p
 	}
 	for _, p := range updated.Items {
+		if p.Spec.ClusterID != original.Name {
+			continue
+		}
 		old, found := byName[p.Name]
-		if !found || old.UID != p.UID || old.ResourceVersion != p.ResourceVersion || old.Generation != p.Generation {
+		if !found || old.UID != p.UID || old.Generation != p.Generation || !reflect.DeepEqual(old.Spec, p.Spec) || !p.DeletionTimestamp.IsZero() {
 			return fmt.Errorf("NodePool inventory changed during IAM preview")
 		}
+		if err := checkRequirements(p.Status.IAMRequirements, string(p.UID), string(fresh.UID), p.Generation, time.Now().UTC()); err != nil {
+			return err
+		}
+		delete(byName, p.Name)
+	}
+	if len(byName) > 0 {
+		return fmt.Errorf("NodePool disappeared during IAM preview")
 	}
 	return nil
+}
+
+func previewFingerprint(p UpdatePreview) string {
+	p.ClusterResourceVersion, p.NodePoolListVersion, p.PlanFingerprint = "", "", ""
+	p.NodePools = slices.Clone(p.NodePools)
+	for i := range p.NodePools {
+		p.NodePools[i].ResourceVersion = ""
+	}
+	if p.Retention != nil {
+		r := *p.Retention
+		r.Required = slices.Clone(r.Required)
+		for i := range r.Required {
+			r.Required[i].Template = canonicalSpec(r.Required[i].Template)
+		}
+		p.Retention = &r
+	}
+	return digestJSON(p)
+}
+
+func digestJSON(value any) string {
+	b, _ := json.Marshal(value)
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(b))
 }
 
 func compareNames(a, b string) int {
