@@ -11,6 +11,7 @@ import (
 
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/infra/iam/application"
 	v1 "github.com/openshift-online/gecko/platform-api/api/public/v1"
+	"google.golang.org/api/googleapi"
 )
 
 type fakeOwnedCleaner struct {
@@ -156,5 +157,202 @@ func TestExternalNetworkIsNeverCleanupTarget(t *testing.T) {
 	f := &fakeOwnedCleaner{fakeOwnedCloud: &fakeOwnedCloud{resources: map[string]*Observed{"Network": {ID: "external", Owner: "foreign", Matches: true}}}, file: file}
 	if err := CleanupOwned(t.Context(), f, p, file, func(context.Context, *application.Journal) error { return nil }); err != nil || len(f.deleted) != 0 || f.resources["Network"] == nil {
 		t.Fatal("explicit external network was altered")
+	}
+}
+
+type firewallCleanupCloud struct {
+	*fakeOwnedCleaner
+	removeOnRead  int
+	firewallReads int
+	readError     error
+}
+
+func (f *firewallCleanupCloud) Read(ctx context.Context, p OwnedPlan, kind, owner string) (*Observed, error) {
+	if kind == "Firewall" {
+		f.firewallReads++
+		if f.readError != nil {
+			return nil, f.readError
+		}
+		if f.firewallReads == f.removeOnRead {
+			delete(f.resources, kind)
+		}
+	}
+	return f.fakeOwnedCloud.Read(ctx, p, kind, owner)
+}
+
+func (f *firewallCleanupCloud) TargetID(context.Context, OwnedPlan, string, string) (string, error) {
+	return "owned-Firewall", nil
+}
+
+func bootstrapFirewallCleanup(t *testing.T) (OwnedPlan, *application.FileJournal, *firewallCleanupCloud) {
+	t.Helper()
+	p, file := networkJournal(t)
+	p.Version = "4.22.21"
+	file.Journal.NetworkFingerprint = p.Fingerprint()
+	file.Journal.NetworkSpec, _ = json.Marshal(p)
+	f := &firewallCleanupCloud{fakeOwnedCleaner: &fakeOwnedCleaner{fakeOwnedCloud: &fakeOwnedCloud{resources: map[string]*Observed{}}, file: file}}
+	for _, kind := range p.Kinds() {
+		id := "owned-" + kind
+		f.resources[kind] = &Observed{ID: id, Owner: expectedOwner(p, kind, file.Journal.Owner()), Matches: true}
+		file.Journal.Steps["network/"+kind] = &application.Step{State: "Verified", Resource: &application.Resource{Name: p.Name(kind), Kind: kind, UID: id, Operation: "create-" + kind}}
+	}
+	if err := file.Save(file.Journal); err != nil {
+		t.Fatal(err)
+	}
+	return p, file, f
+}
+
+func TestControllerRemovedBootstrapFirewallCleanup(t *testing.T) {
+	for _, removeOnRead := range []int{1, 2} {
+		t.Run(fmt.Sprint(removeOnRead), func(t *testing.T) {
+			p, primary, cloud := bootstrapFirewallCleanup(t)
+			cloud.removeOnRead = removeOnRead
+			before, err := os.ReadFile(primary.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := primary.Close(); err != nil {
+				t.Fatal(err)
+			}
+			linked, err := application.OpenUpdates(primary.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud.linked = linked
+			proof := func(context.Context, *application.Journal) error { return nil }
+			if err := CleanupOwned(t.Context(), cloud, p, linked, proof); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cloud.deleted, []string{"Router", "Subnet", "Network"}) {
+				t.Fatalf("unexpected delete calls: %v", cloud.deleted)
+			}
+			state, err := application.LoadUpdates(primary.Path, linked.Primary.Journal)
+			if err != nil || state.Cleanup.Steps["network/Firewall"].State != "Deleted" || state.Cleanup.Steps["network/Firewall"].DeleteOperation != "" {
+				t.Fatalf("controller-removed firewall not durably recorded: %v", err)
+			}
+			if err := linked.Close(); err != nil {
+				t.Fatal(err)
+			}
+			linked, err = application.OpenUpdates(primary.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer linked.Close()
+			cloud.linked = linked
+			if err := CleanupOwned(t.Context(), cloud, p, linked, proof); err != nil || len(cloud.deleted) != 3 {
+				t.Fatalf("resume repeated deletion: %v", err)
+			}
+			after, err := os.ReadFile(primary.Path)
+			if err != nil || string(before) != string(after) {
+				t.Fatal("firewall cleanup changed the original journal")
+			}
+		})
+	}
+}
+
+func TestBootstrapFirewallCleanupKeepsStrictRefusals(t *testing.T) {
+	tests := []struct {
+		name  string
+		alter func(*application.Step, *firewallCleanupCloud)
+	}{
+		{"missing network", func(_ *application.Step, f *firewallCleanupCloud) { delete(f.resources, "Network") }},
+		{"missing subnet", func(_ *application.Step, f *firewallCleanupCloud) { delete(f.resources, "Subnet") }},
+		{"missing router", func(_ *application.Step, f *firewallCleanupCloud) { delete(f.resources, "Router") }},
+		{"replaced firewall", func(_ *application.Step, f *firewallCleanupCloud) { f.resources["Firewall"].ID = "replacement" }},
+		{"foreign firewall", func(_ *application.Step, f *firewallCleanupCloud) { f.resources["Firewall"].Owner = "foreign" }},
+		{"modified firewall", func(_ *application.Step, f *firewallCleanupCloud) { f.resources["Firewall"].Matches = false }},
+		{"missing UID", func(s *application.Step, f *firewallCleanupCloud) {
+			s.Resource.UID = ""
+			delete(f.resources, "Firewall")
+		}},
+		{"wrong name", func(s *application.Step, f *firewallCleanupCloud) {
+			s.Resource.Name = "other"
+			delete(f.resources, "Firewall")
+		}},
+		{"existing delete operation", func(s *application.Step, f *firewallCleanupCloud) {
+			s.DeleteOperation = "unknown-delete"
+			delete(f.resources, "Firewall")
+		}},
+		{"wrong kind", func(s *application.Step, f *firewallCleanupCloud) {
+			s.Resource.Kind = "Network"
+			delete(f.resources, "Firewall")
+		}},
+		{"unknown creation", func(s *application.Step, f *firewallCleanupCloud) {
+			s.State = "Unknown"
+			delete(f.resources, "Firewall")
+		}},
+		{"intent creation", func(s *application.Step, f *firewallCleanupCloud) {
+			s.State = "Intent"
+			delete(f.resources, "Firewall")
+		}},
+		{"forbidden read", func(_ *application.Step, f *firewallCleanupCloud) { f.readError = &googleapi.Error{Code: 403} }},
+		{"transport read", func(_ *application.Step, f *firewallCleanupCloud) { f.readError = fmt.Errorf("transport unavailable") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, file, cloud := bootstrapFirewallCleanup(t)
+			tt.alter(file.Journal.Steps["network/Firewall"], cloud)
+			if err := CleanupOwned(t.Context(), cloud, p, file, func(context.Context, *application.Journal) error { return nil }); err == nil || len(cloud.deleted) != 0 {
+				t.Fatalf("unsafe cleanup accepted or sent deletes: %v, %v", err, cloud.deleted)
+			}
+		})
+	}
+}
+
+type failFirewallSave struct{ *application.FileJournal }
+
+func (f failFirewallSave) Save(j *application.Journal) error {
+	if j.Steps["network/Firewall"].State == "Deleted" {
+		return fmt.Errorf("injected save failure")
+	}
+	return f.FileJournal.Save(j)
+}
+
+func TestControllerRemovedFirewallRequiresProofAndDurableSave(t *testing.T) {
+	for _, failProof := range []bool{false, true} {
+		t.Run(fmt.Sprint(failProof), func(t *testing.T) {
+			p, file, cloud := bootstrapFirewallCleanup(t)
+			delete(cloud.resources, "Firewall")
+			proof := func(context.Context, *application.Journal) error {
+				if failProof {
+					return fmt.Errorf("hosted teardown not proved")
+				}
+				return nil
+			}
+			if err := CleanupOwned(t.Context(), cloud, p, failFirewallSave{file}, proof); err == nil || len(cloud.deleted) != 0 {
+				t.Fatalf("proof/save failure did not block deletions: %v", err)
+			}
+			persisted, err := application.Load(file.Path)
+			if err != nil || persisted.Steps["network/Firewall"].State != "Verified" {
+				t.Fatalf("failed proof/save changed persisted firewall state: %v", err)
+			}
+		})
+	}
+}
+
+func TestControllerRemovedFirewallResumeAfterProofInterruption(t *testing.T) {
+	p, file, cloud := bootstrapFirewallCleanup(t)
+	delete(cloud.resources, "Firewall")
+	proofs := 0
+	err := CleanupOwned(t.Context(), cloud, p, file, func(context.Context, *application.Journal) error {
+		proofs++
+		if proofs == 2 {
+			return fmt.Errorf("teardown proof temporarily unavailable")
+		}
+		return nil
+	})
+	if err == nil || len(cloud.deleted) != 0 {
+		t.Fatal("lost proof did not stop after recording firewall absence")
+	}
+	persisted, err := application.Load(file.Path)
+	if err != nil || persisted.Steps["network/Firewall"].State != "Deleted" || persisted.Steps["network/Router"].State != "Verified" {
+		t.Fatalf("partial cleanup state was not durable: %v", err)
+	}
+	file.Journal = persisted
+	if err := CleanupOwned(t.Context(), cloud, p, file, func(context.Context, *application.Journal) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cloud.deleted, []string{"Router", "Subnet", "Network"}) {
+		t.Fatalf("resume did not preserve reverse deletion order: %v", cloud.deleted)
 	}
 }

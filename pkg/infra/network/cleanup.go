@@ -16,6 +16,11 @@ func (c *OwnedGCP) StartDelete(ctx context.Context, p OwnedPlan, kind string) (s
 	return c.Client.StartOwnedDelete(ctx, kind, p.Name(kind))
 }
 
+func verifiedBootstrapFirewall(p OwnedPlan, kind string, step *application.Step) bool {
+	return kind == "Firewall" && p.Name(kind) != "" && step.State == "Verified" && step.DeleteOperation == "" &&
+		step.Resource != nil && step.Resource.UID != "" && step.Resource.Kind == kind && step.Resource.Name == p.Name(kind)
+}
+
 // CleanupOwned is used only after the caller has proved hosted teardown and
 // absence of cloud dependants. Explicit external networks are never deleted.
 // Compute deletes have no numeric-ID CAS: the re-GET narrows, not closes, races.
@@ -62,6 +67,10 @@ func CleanupOwned(ctx context.Context, c OwnedCleaner, p OwnedPlan, file interfa
 			}
 			continue
 		}
+		// A pre-5.0 bootstrap rule can be adopted by the CPO and removed during
+		// normal hosted teardown. Only an already verified, exact journaled rule
+		// qualifies; resolving an uncertain create must not imply this handoff.
+		controllerRemovalAllowed := verifiedBootstrapFirewall(p, kind, step)
 		if (step.State == "Intent" || step.State == "Unknown") && step.Resource != nil && step.Resource.Operation != "" {
 			if err := c.Wait(ctx, kind, step.Resource.Operation); err != nil {
 				return &application.CloudError{Cause: err}
@@ -84,6 +93,13 @@ func CleanupOwned(ctx context.Context, c OwnedCleaner, p OwnedPlan, file interfa
 			return fmt.Errorf("uncertain network identity must be resolved before deletion")
 		}
 		v, err := c.Read(ctx, p, kind, j.Owner())
+		if missing(err) && controllerRemovalAllowed {
+			step.State = "Deleted"
+			if err := file.Save(j); err != nil {
+				return err
+			}
+			continue
+		}
 		if missing(err) && step.State == "Deleting" {
 			continue
 		}
@@ -105,7 +121,7 @@ func CleanupOwned(ctx context.Context, c OwnedCleaner, p OwnedPlan, file interfa
 			return err
 		}
 		v, err := c.Read(ctx, p, kind, j.Owner())
-		if missing(err) && step.State == "Deleting" {
+		if missing(err) && (step.State == "Deleting" || verifiedBootstrapFirewall(p, kind, step)) {
 			step.State = "Deleted"
 			if err := file.Save(j); err != nil {
 				return err
