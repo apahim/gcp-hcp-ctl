@@ -12,8 +12,8 @@ import (
 
 // PlatformRoleInterface exposes only platform-scoped catalog reads.
 type PlatformRoleInterface interface {
-	List(context.Context) (*PlatformRoleList, error)
-	Get(context.Context, string) (*PlatformRole, error)
+	List(context.Context) (*gcpv1.PlatformRoleList, error)
+	Get(context.Context, string) (*gcpv1.PlatformRole, error)
 }
 
 // Bound requests and token tracking if a broken endpoint keeps returning unique
@@ -29,8 +29,8 @@ func (c *Client) PlatformRoles() PlatformRoleInterface {
 
 // Get fetches one platform-scoped catalog entry and preserves centralized safe error
 // normalization.
-func (c *platformRoleClient) Get(ctx context.Context, name string) (*PlatformRole, error) {
-	result := &PlatformRole{}
+func (c *platformRoleClient) Get(ctx context.Context, name string) (*gcpv1.PlatformRole, error) {
+	result := &gcpv1.PlatformRole{}
 	response := c.restClient.Get().
 		Resource("platformroles").
 		Name(name).
@@ -44,15 +44,15 @@ func (c *platformRoleClient) Get(ctx context.Context, name string) (*PlatformRol
 
 // List returns the complete platform-scoped platform-role catalog in at most
 // 100 pages. It returns an error, not partial results, if the limit is exceeded.
-func (c *platformRoleClient) List(ctx context.Context) (*PlatformRoleList, error) {
-	var result *PlatformRoleList
+func (c *platformRoleClient) List(ctx context.Context) (*gcpv1.PlatformRoleList, error) {
+	var result *gcpv1.PlatformRoleList
 	token := ""
 	seen := map[string]bool{}
 	for pageNumber := 0; ; pageNumber++ {
 		if pageNumber == maxPlatformRoleListPages {
 			return nil, errors.New("pagination limit exceeded")
 		}
-		page := &PlatformRoleList{}
+		page := &gcpv1.PlatformRoleList{}
 		request := c.restClient.Get().Resource("platformroles")
 		if token != "" {
 			request = request.Param("continue", token)
@@ -77,7 +77,7 @@ func (c *platformRoleClient) List(ctx context.Context) (*PlatformRoleList, error
 	result.Continue = ""
 	result.RemainingItemCount = nil
 	if result.Items == nil {
-		result.Items = []PlatformRole{}
+		result.Items = []gcpv1.PlatformRole{}
 	}
 	result.SetGroupVersionKind(gcpv1.GroupVersion.WithKind("PlatformRoleList"))
 	return result, nil

@@ -3,8 +3,12 @@ package nodepool
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/auth"
@@ -111,7 +115,7 @@ func filterNodePoolsByCluster(pools []gcpv1.NodePool, clusterName string) []gcpv
 	return filtered
 }
 
-func printNodePool(w io.Writer, np *gcpv1.NodePool, format string) error {
+func printNodePool(w io.Writer, np *gcpv1.NodePool, parentInfraID string, format string) error {
 	switch output.ParseFormat(format) {
 	case output.FormatJSON:
 		return output.PrintJSON(w, np)
@@ -122,37 +126,47 @@ func printNodePool(w io.Writer, np *gcpv1.NodePool, format string) error {
 
 	bw := bufio.NewWriter(w)
 
-	fmt.Fprintf(bw, "Name:         %s\n", np.Name)
-	fmt.Fprintf(bw, "ID:           %s\n", np.UID)
-	fmt.Fprintf(bw, "Cluster:      %s\n", np.Spec.ClusterID)
-	fmt.Fprintf(bw, "Generation:   %d\n", np.Generation)
+	fmt.Fprintf(bw, "Name:            %s\n", np.Name)
+	fmt.Fprintf(bw, "ID:              %s\n", np.UID)
+	fmt.Fprintf(bw, "Cluster:         %s\n", np.Spec.ClusterID)
+	if parentInfraID != "" {
+		fmt.Fprintf(bw, "Infra ID:        %s\n", parentInfraID)
+	}
+	fmt.Fprintf(bw, "Generation:      %d\n", np.Generation)
 	if np.Spec.NodeCount != nil {
-		fmt.Fprintf(bw, "Replicas:     %d\n", *np.Spec.NodeCount)
+		fmt.Fprintf(bw, "Replicas:        %d\n", *np.Spec.NodeCount)
 	}
 	if np.Spec.Platform.GCP != nil {
 		if np.Spec.Platform.GCP.MachineType != "" {
-			fmt.Fprintf(bw, "Instance:     %s\n", np.Spec.Platform.GCP.MachineType)
+			fmt.Fprintf(bw, "Instance:        %s\n", np.Spec.Platform.GCP.MachineType)
 		}
 		if np.Spec.Platform.GCP.DiskSizeGB > 0 {
-			fmt.Fprintf(bw, "Disk Size:    %d GB\n", np.Spec.Platform.GCP.DiskSizeGB)
+			fmt.Fprintf(bw, "Disk Size:       %d GB\n", np.Spec.Platform.GCP.DiskSizeGB)
 		}
 		if np.Spec.Platform.GCP.DiskType != "" {
-			fmt.Fprintf(bw, "Disk Type:    %s\n", np.Spec.Platform.GCP.DiskType)
+			fmt.Fprintf(bw, "Disk Type:       %s\n", np.Spec.Platform.GCP.DiskType)
 		}
 		if np.Spec.Platform.GCP.Zone != "" {
-			fmt.Fprintf(bw, "Zone:         %s\n", np.Spec.Platform.GCP.Zone)
+			fmt.Fprintf(bw, "Zone:            %s\n", np.Spec.Platform.GCP.Zone)
 		}
 	}
 	if np.Spec.Release.Version != "" {
-		fmt.Fprintf(bw, "Version:      %s\n", np.Spec.Release.Version)
+		fmt.Fprintf(bw, "Target Version:  %s\n", np.Spec.Release.Version)
 	}
-	fmt.Fprintf(bw, "Status:       %s\n", nodePoolStatusDetail(np))
+	if np.Status.Version != "" {
+		fmt.Fprintf(bw, "Current Version: %s\n", np.Status.Version)
+	}
+	fmt.Fprintf(bw, "Status:          %s\n", nodePoolStatusDetail(np))
 	if !np.CreationTimestamp.IsZero() {
-		fmt.Fprintf(bw, "CreatedAt:    %s\n", np.CreationTimestamp.UTC().Format(time.RFC3339))
+		fmt.Fprintf(bw, "Created:         %s (%s)\n",
+			np.CreationTimestamp.UTC().Format(time.RFC3339),
+			output.Age(np.CreationTimestamp.UTC().Format(time.RFC3339)))
 	}
 
 	if np.DeletionTimestamp != nil {
-		fmt.Fprintf(bw, "DeletedAt:    %s\n", np.DeletionTimestamp.UTC().Format(time.RFC3339))
+		fmt.Fprintf(bw, "Deleted:         %s (%s)\n",
+			np.DeletionTimestamp.UTC().Format(time.RFC3339),
+			output.Age(np.DeletionTimestamp.UTC().Format(time.RFC3339)))
 	}
 
 	if len(np.Status.Conditions) > 0 {
@@ -174,6 +188,27 @@ func printNodePool(w io.Writer, np *gcpv1.NodePool, format string) error {
 	}
 
 	return bw.Flush()
+}
+
+// fetchParentInfraID returns the infra ID of the nodepool's parent cluster for
+// text rendering; JSON and YAML output the raw object and skip the lookup
+// entirely. A parent cluster that no longer exists (a nodepool can briefly
+// outlive its cluster during cascading deletion) omits the Infra ID line;
+// other lookup failures warn but do not prevent rendering the nodepool.
+func fetchParentInfraID(ctx context.Context, client *platformapi.Client, np *gcpv1.NodePool, format string, errOut io.Writer) string {
+	if output.ParseFormat(format) != output.FormatText {
+		return ""
+	}
+	cluster, err := client.Clusters().Get(ctx, client.Namespace(), np.Spec.ClusterID)
+	if err != nil {
+		var httpErr *platformapi.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode() == http.StatusNotFound {
+			return ""
+		}
+		fmt.Fprintf(errOut, "Warning: unable to look up parent cluster %q: %v\n", np.Spec.ClusterID, err)
+		return ""
+	}
+	return cluster.Spec.InfraID
 }
 
 // nodePoolStatus returns a short human-friendly phase for table/list output.
@@ -290,4 +325,26 @@ func machineType(np *gcpv1.NodePool) string {
 		return np.Spec.Platform.GCP.MachineType
 	}
 	return "-"
+}
+
+// Match the platform API's zone validation rule before deriving a region.
+var nodePoolZonePattern = regexp.MustCompile(`^[a-z]+(?:-[a-z0-9]+)*-[a-z]$`)
+
+// regionFromZone derives the GCP region from the nodepool's zone. Zones are
+// required and validated as "{region}-{zone}" (e.g. "us-central1-a"), so the
+// region is the zone minus its last hyphen-separated segment. Returns "" when
+// the zone is missing or malformed, mirroring how cluster list renders a
+// missing region.
+func regionFromZone(np *gcpv1.NodePool) string {
+	zone := ""
+	if np.Spec.Platform.GCP != nil {
+		zone = np.Spec.Platform.GCP.Zone
+	}
+	if !nodePoolZonePattern.MatchString(zone) {
+		return ""
+	}
+	if i := strings.LastIndex(zone, "-"); i > 0 {
+		return zone[:i]
+	}
+	return ""
 }

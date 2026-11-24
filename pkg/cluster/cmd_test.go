@@ -98,6 +98,66 @@ func TestPrintClusterMaintenance(t *testing.T) {
 	})
 }
 
+func TestPrintClusterVersions(t *testing.T) {
+	t.Run("renders target version with channel group and current version", func(t *testing.T) {
+		c := &gcpv1.Cluster{}
+		c.Name = "my-cluster"
+		c.Spec.Release.Version = "5.0.1"
+		c.Spec.Release.ChannelGroup = "stable"
+		c.Status.HostedClusterResult = &gcpv1.HostedClusterResult{Version: "5.0.0"}
+
+		var buf bytes.Buffer
+		if err := printCluster(&buf, c, "text"); err != nil {
+			t.Fatalf("printCluster: %v", err)
+		}
+		got := buf.String()
+		for _, want := range []string{
+			"Target Version:  5.0.1 (stable)",
+			"Current Version: 5.0.0",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "HC Version") {
+			t.Errorf("output still contains the old HC Version label:\n%s", got)
+		}
+	})
+
+	t.Run("omits version lines when both are unset", func(t *testing.T) {
+		c := &gcpv1.Cluster{}
+		c.Name = "my-cluster"
+
+		var buf bytes.Buffer
+		if err := printCluster(&buf, c, "text"); err != nil {
+			t.Fatalf("printCluster: %v", err)
+		}
+		got := buf.String()
+		if strings.Contains(got, "Target Version:") || strings.Contains(got, "Current Version:") {
+			t.Errorf("unexpected version lines in output:\n%s", got)
+		}
+	})
+
+	t.Run("omits current version when HostedClusterResult reports none", func(t *testing.T) {
+		c := &gcpv1.Cluster{}
+		c.Name = "my-cluster"
+		c.Spec.Release.Version = "5.0.1"
+		c.Status.HostedClusterResult = &gcpv1.HostedClusterResult{}
+
+		var buf bytes.Buffer
+		if err := printCluster(&buf, c, "text"); err != nil {
+			t.Fatalf("printCluster: %v", err)
+		}
+		got := buf.String()
+		if !strings.Contains(got, "Target Version:  5.0.1\n") {
+			t.Errorf("missing target version line:\n%s", got)
+		}
+		if strings.Contains(got, "Current Version:") {
+			t.Errorf("unexpected current version line:\n%s", got)
+		}
+	})
+}
+
 func TestClusterStatus(t *testing.T) {
 	t.Run("When there are no conditions it should return Pending", func(t *testing.T) {
 		c := &gcpv1.Cluster{

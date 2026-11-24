@@ -87,7 +87,7 @@ func client(cmd *cobra.Command) platformapi.PlatformRoleInterface {
 
 // prepareRole applies the catalog's minimal CLI output contract without mutating
 // the API response. In particular, do not surface managedFields or GitOps data.
-func prepareRole(role *platformapi.PlatformRole) *platformapi.PlatformRole {
+func prepareRole(role *gcpv1.PlatformRole) *gcpv1.PlatformRole {
 	role = role.DeepCopy()
 	role.TypeMeta = metav1.TypeMeta{APIVersion: gcpv1.GroupVersion.String(), Kind: "PlatformRole"}
 	role.ObjectMeta = metav1.ObjectMeta{Name: role.Name, CreationTimestamp: role.CreationTimestamp}
@@ -111,7 +111,7 @@ func newListCmd() *cobra.Command {
 			roles.Continue = ""
 			roles.RemainingItemCount = nil
 			if roles.Items == nil {
-				roles.Items = []platformapi.PlatformRole{}
+				roles.Items = []gcpv1.PlatformRole{}
 			}
 			for i := range roles.Items {
 				roles.Items[i] = *prepareRole(&roles.Items[i])

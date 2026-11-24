@@ -45,11 +45,12 @@ func newListCmd() *cobra.Command {
 				return err
 			}
 
-			t := output.NewTable(out, "NAME", "CLUSTER", "REPLICAS", "INSTANCE", "VERSION", "STATUS", "AGE")
+			t := output.NewTable(out, "NAME", "CLUSTER", "REGION", "REPLICAS", "INSTANCE", "VERSION", "STATUS", "AGE")
 			for _, np := range allNodePools {
 				t.AddRow(
 					np.Name,
 					np.Spec.ClusterID,
+					regionFromZone(&np),
 					nodeCount(&np),
 					machineType(&np),
 					releaseVersion(&np),

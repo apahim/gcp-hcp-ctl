@@ -81,7 +81,8 @@ func (o *createOptions) run(cmd *cobra.Command, npName string) error {
 		return fmt.Errorf("creating nodepool: %w", err)
 	}
 
-	return printNodePool(cmd.OutOrStdout(), created, o.outputFmt)
+	infraID := fetchParentInfraID(ctx, client, created, o.outputFmt, cmd.ErrOrStderr())
+	return printNodePool(cmd.OutOrStdout(), created, infraID, o.outputFmt)
 }
 
 // validate checks the create options against constraints the platform-api-server

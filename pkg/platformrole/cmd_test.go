@@ -16,6 +16,7 @@ import (
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/discovery"
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/internal/access"
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/platformapi"
+	gcpv1 "github.com/openshift-online/gecko/platform-api/api/public/v1"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -203,7 +204,7 @@ func TestCommandReadOnlyAndArgs(t *testing.T) {
 // TestPrepareRoleDoesNotMutateResponse checks that output cleanup deep-copies permissions
 // and metadata.
 func TestPrepareRoleDoesNotMutateResponse(t *testing.T) {
-	role := &platformapi.PlatformRole{ObjectMeta: metav1.ObjectMeta{Name: "reader", Annotations: map[string]string{"argocd": "internal"}}, Spec: platformapi.PlatformRoleSpec{Permissions: []string{"cluster.get"}}}
+	role := &gcpv1.PlatformRole{ObjectMeta: metav1.ObjectMeta{Name: "reader", Annotations: map[string]string{"argocd": "internal"}}, Spec: gcpv1.PlatformRoleSpec{Permissions: []string{"cluster.get"}}}
 	before := role.DeepCopy()
 	prepared := prepareRole(role)
 	prepared.Spec.Permissions[0] = "changed"
@@ -291,7 +292,7 @@ func TestListErrorHasOneOperationPrefix(t *testing.T) {
 				if tc.name == "page limit" {
 					token = fmt.Sprintf("SECRET-token-%d", calls)
 				}
-				page := platformapi.PlatformRoleList{ListMeta: metav1.ListMeta{Continue: token}}
+				page := gcpv1.PlatformRoleList{ListMeta: metav1.ListMeta{Continue: token}}
 				page.APIVersion = "gcp.managed.openshift.io/v1"
 				page.Kind = "PlatformRoleList"
 				if err := json.NewEncoder(w).Encode(page); err != nil {
