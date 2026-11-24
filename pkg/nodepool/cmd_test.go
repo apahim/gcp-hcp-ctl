@@ -515,13 +515,9 @@ func TestRegionFromZone(t *testing.T) {
 	}
 }
 
-func executeNodepoolError(t *testing.T, code int, body string, args ...string) (error, string, string) {
+func executeNodepoolServer(t *testing.T, handler http.HandlerFunc, args ...string) (error, string, string) {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(code)
-		_, _ = w.Write([]byte(body))
-	}))
+	server := httptest.NewServer(handler)
 	defer server.Close()
 	client, err := platformapi.NewClientForTest(server.URL, "my-project")
 	if err != nil {
@@ -540,6 +536,15 @@ func executeNodepoolError(t *testing.T, code int, body string, args ...string) (
 	root.SetArgs(append([]string{"nodepool"}, args...))
 	err = root.Execute()
 	return err, stdout.String(), stderr.String()
+}
+
+func executeNodepoolError(t *testing.T, code int, body string, args ...string) (error, string, string) {
+	t.Helper()
+	return executeNodepoolServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(body))
+	}), args...)
 }
 
 func TestNodepoolCommandErrorBoundary(t *testing.T) {
@@ -632,7 +637,7 @@ func TestPrintNodePoolVersions(t *testing.T) {
 		np.Status.Version = "5.0.0"
 
 		var buf bytes.Buffer
-		if err := printNodePool(&buf, np, "text"); err != nil {
+		if err := printNodePool(&buf, np, "", "text"); err != nil {
 			t.Fatalf("printNodePool: %v", err)
 		}
 		got := buf.String()
@@ -651,7 +656,7 @@ func TestPrintNodePoolVersions(t *testing.T) {
 		np.Name = "workers"
 
 		var buf bytes.Buffer
-		if err := printNodePool(&buf, np, "text"); err != nil {
+		if err := printNodePool(&buf, np, "", "text"); err != nil {
 			t.Fatalf("printNodePool: %v", err)
 		}
 		if strings.Contains(buf.String(), "Version:") {
@@ -665,7 +670,7 @@ func TestPrintNodePoolVersions(t *testing.T) {
 		np.Spec.Release.Version = "5.0.1"
 
 		var buf bytes.Buffer
-		if err := printNodePool(&buf, np, "text"); err != nil {
+		if err := printNodePool(&buf, np, "", "text"); err != nil {
 			t.Fatalf("printNodePool: %v", err)
 		}
 		got := buf.String()
@@ -676,4 +681,202 @@ func TestPrintNodePoolVersions(t *testing.T) {
 			t.Errorf("unexpected current version line:\n%s", got)
 		}
 	})
+}
+
+func TestPrintNodePoolCreatedDeleted(t *testing.T) {
+	np := &gcpv1.NodePool{}
+	np.Name = "workers"
+	np.CreationTimestamp = metav1.Time{Time: time.Now().UTC().Add(-6 * 24 * time.Hour)}
+	np.DeletionTimestamp = &metav1.Time{Time: time.Now().UTC().Add(-2 * time.Hour)}
+
+	var buf bytes.Buffer
+	if err := printNodePool(&buf, np, "", "text"); err != nil {
+		t.Fatalf("printNodePool: %v", err)
+	}
+	got := buf.String()
+
+	created := np.CreationTimestamp.UTC().Format(time.RFC3339)
+	if want := "Created:         " + created + " (6d)\n"; !strings.Contains(got, want) {
+		t.Errorf("output missing %q:\n%s", want, got)
+	}
+	deleted := np.DeletionTimestamp.UTC().Format(time.RFC3339)
+	if want := "Deleted:         " + deleted + " (2h)\n"; !strings.Contains(got, want) {
+		t.Errorf("output missing %q:\n%s", want, got)
+	}
+	for _, stale := range []string{"CreatedAt", "DeletedAt"} {
+		if strings.Contains(got, stale) {
+			t.Errorf("output contains stale label %q:\n%s", stale, got)
+		}
+	}
+}
+
+func TestPrintNodePoolInfraID(t *testing.T) {
+	newNodePool := func() *gcpv1.NodePool {
+		np := &gcpv1.NodePool{}
+		np.Name = "workers"
+		np.Spec.ClusterID = "wif3-first"
+		return np
+	}
+
+	t.Run("renders Infra ID after Cluster", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := printNodePool(&buf, newNodePool(), "wif3-first-abcde", "text"); err != nil {
+			t.Fatalf("printNodePool: %v", err)
+		}
+		want := "Cluster:         wif3-first\nInfra ID:        wif3-first-abcde\n"
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("output missing %q:\n%s", want, buf.String())
+		}
+	})
+
+	t.Run("omits Infra ID when parent cluster is unknown", func(t *testing.T) {
+		var buf bytes.Buffer
+		if err := printNodePool(&buf, newNodePool(), "", "text"); err != nil {
+			t.Fatalf("printNodePool: %v", err)
+		}
+		if strings.Contains(buf.String(), "Infra ID:") {
+			t.Errorf("unexpected Infra ID line:\n%s", buf.String())
+		}
+	})
+}
+
+// nodepoolGetHandler serves a workers nodepool in project my-project plus a
+// configurable response for its parent cluster lookup.
+func nodepoolGetHandler(t *testing.T, created string, clusterCode int, clusterBody string) http.HandlerFunc {
+	t.Helper()
+	condition := func(condType string) string {
+		return `{"type":"` + condType + `","status":"True","reason":"` + condType + `","lastTransitionTime":"` + created + `"}`
+	}
+	nodepoolBody := `{"apiVersion":"gcp.managed.openshift.io/v1","kind":"NodePool",` +
+		`"metadata":{"name":"workers","uid":"11111111-2222-3333-4444-555555555555","creationTimestamp":"` + created + `","generation":1},` +
+		`"spec":{"clusterID":"wif3-first","nodeCount":3,"release":{"version":"5.0.2"},` +
+		`"platform":{"gcp":{"machineType":"n2-standard-4","diskSizeGB":100,"diskType":"pd-balanced","zone":"northamerica-northeast2-a"}}},` +
+		`"status":{"version":"5.0.2","conditions":[` + condition("NodePoolAvailable") + `,` + condition("NodePoolHealthy") + `]}}`
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/gcp.managed.openshift.io/v1/namespaces/my-project/nodepools/workers":
+			_, _ = w.Write([]byte(nodepoolBody))
+		case "/apis/gcp.managed.openshift.io/v1/namespaces/my-project/clusters/wif3-first":
+			w.WriteHeader(clusterCode)
+			_, _ = w.Write([]byte(clusterBody))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}
+}
+
+func TestNodepoolGetShowsInfraIDAndAge(t *testing.T) {
+	created := time.Now().UTC().Add(-6 * 24 * time.Hour).Format(time.RFC3339)
+	clusterBody := `{"apiVersion":"gcp.managed.openshift.io/v1","kind":"Cluster",` +
+		`"metadata":{"name":"wif3-first"},"spec":{"infraID":"wif3-first-abcde"}}`
+
+	err, out, stderr := executeNodepoolServer(t, nodepoolGetHandler(t, created, http.StatusOK, clusterBody), "get", "workers")
+	if err != nil {
+		t.Fatalf("getting nodepool: %v (stderr: %q)", err, stderr)
+	}
+
+	for _, want := range []string{
+		"Cluster:         wif3-first\nInfra ID:        wif3-first-abcde\n",
+		"Created:         " + created + " (6d)\n",
+		"Status:          Ready\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "CreatedAt") {
+		t.Errorf("output contains stale CreatedAt label:\n%s", out)
+	}
+}
+
+func TestNodepoolGetOmitsInfraIDWhenClusterGone(t *testing.T) {
+	created := time.Now().UTC().Add(-6 * 24 * time.Hour).Format(time.RFC3339)
+	clusterBody := `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","message":"cluster not found"}`
+
+	err, out, stderr := executeNodepoolServer(t, nodepoolGetHandler(t, created, http.StatusNotFound, clusterBody), "get", "workers")
+	if err != nil {
+		t.Fatalf("getting nodepool with missing parent cluster: %v (stderr: %q)", err, stderr)
+	}
+	if strings.Contains(out, "Infra ID:") {
+		t.Errorf("unexpected Infra ID line for missing parent cluster:\n%s", out)
+	}
+	if !strings.Contains(out, "Cluster:         wif3-first\n") {
+		t.Errorf("missing Cluster line:\n%s", out)
+	}
+	if stderr != "" {
+		t.Errorf("unexpected warning for missing parent cluster: %q", stderr)
+	}
+}
+
+func TestNodepoolGetPrintsWhenParentClusterLookupFails(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			created := time.Now().UTC().Add(-6 * 24 * time.Hour).Format(time.RFC3339)
+			err, out, stderr := executeNodepoolServer(t, nodepoolGetHandler(t, created, code, `{}`), "get", "workers")
+			if err != nil {
+				t.Fatalf("getting nodepool: %v (stderr: %q)", err, stderr)
+			}
+			if !strings.Contains(out, "Cluster:         wif3-first\n") || !strings.Contains(out, "Name:            workers\n") {
+				t.Errorf("nodepool details missing:\n%s", out)
+			}
+			if strings.Contains(out, "Infra ID:") {
+				t.Errorf("unexpected Infra ID line:\n%s", out)
+			}
+			if !strings.Contains(stderr, `Warning: unable to look up parent cluster "wif3-first":`) {
+				t.Errorf("missing parent lookup warning: %q", stderr)
+			}
+		})
+	}
+}
+
+func TestNodepoolCreateParentInfraIDLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		clusterCode int
+		format      string
+		wantInfraID bool
+		wantWarning bool
+	}{
+		{"success", http.StatusOK, "text", true, false},
+		{"forbidden", http.StatusForbidden, "text", false, true},
+		{"server error", http.StatusInternalServerError, "text", false, true},
+		{"JSON skips lookup", http.StatusForbidden, "json", false, false},
+		{"YAML skips lookup", http.StatusForbidden, "yaml", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/apis/gcp.managed.openshift.io/v1/namespaces/my-project/nodepools":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"apiVersion":"gcp.managed.openshift.io/v1","kind":"NodePool",` +
+						`"metadata":{"name":"workers"},"spec":{"clusterID":"wif3-first",` +
+						`"release":{"version":"5.0.2"},"platform":{"gcp":{"zone":"us-central1-a"}}}}`))
+				case r.Method == http.MethodGet && r.URL.Path == "/apis/gcp.managed.openshift.io/v1/namespaces/my-project/clusters/wif3-first":
+					w.WriteHeader(tc.clusterCode)
+					_, _ = w.Write([]byte(`{"apiVersion":"gcp.managed.openshift.io/v1","kind":"Cluster",` +
+						`"metadata":{"name":"wif3-first"},"spec":{"infraID":"wif3-first-abcde"}}`))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+			})
+			err, out, stderr := executeNodepoolServer(t, handler, "create", "workers", "--cluster", "wif3-first", "--version", "5.0.2", "--zone", "us-central1-a", "--subnet", "my-subnet", "-o", tc.format)
+			if err != nil {
+				t.Fatalf("creating nodepool: %v (stderr: %q)", err, stderr)
+			}
+			if !strings.Contains(out, "workers") {
+				t.Errorf("created nodepool missing from output: %q", out)
+			}
+			if got := strings.Contains(out, "Infra ID:"); got != tc.wantInfraID {
+				t.Errorf("Infra ID present = %v, want %v:\n%s", got, tc.wantInfraID, out)
+			}
+			if tc.wantInfraID && !strings.Contains(out, "Infra ID:        wif3-first-abcde\n") {
+				t.Errorf("created nodepool missing parent Infra ID:\n%s", out)
+			}
+			if got := strings.Contains(stderr, `Warning: unable to look up parent cluster "wif3-first":`); got != tc.wantWarning {
+				t.Errorf("warning present = %v, want %v: %q", got, tc.wantWarning, stderr)
+			}
+		})
+	}
 }

@@ -58,7 +58,9 @@ func newScaleCmd() *cobra.Command {
 			}
 
 			if output.ParseFormat(outputFmt) != output.FormatText {
-				return printNodePool(cmd.OutOrStdout(), updated, outputFmt)
+				// Structured output renders the raw object; the parent
+				// cluster's infra ID only appears in text rendering.
+				return printNodePool(cmd.OutOrStdout(), updated, "", outputFmt)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Nodepool %s scaled to %d replicas.\n", npName, replicaCount)
 			return nil

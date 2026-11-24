@@ -19,12 +19,14 @@ func newGetCmd() *cobra.Command {
 			return cobra.ExactArgs(1)(cmd, args)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			np, err := clientFromCmd(cmd).ResolveNodePool(cmd.Context(), args[0])
+			client := clientFromCmd(cmd)
+			np, err := client.ResolveNodePool(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
 
-			return printNodePool(cmd.OutOrStdout(), np, outputFmt)
+			infraID := fetchParentInfraID(cmd.Context(), client, np, outputFmt, cmd.ErrOrStderr())
+			return printNodePool(cmd.OutOrStdout(), np, infraID, outputFmt)
 		},
 	}
 
