@@ -109,6 +109,14 @@ func TestNewCreateCommand(t *testing.T) {
 	if outputFlag == nil {
 		t.Error("expected output-file flag to be defined")
 	}
+
+	enableIngressFlag := cmd.Flag("enable-ingress")
+	if enableIngressFlag == nil {
+		t.Fatal("expected enable-ingress flag to be defined")
+	}
+	if enableIngressFlag.DefValue != "false" {
+		t.Errorf("expected enable-ingress to default to false, got %q", enableIngressFlag.DefValue)
+	}
 }
 
 func TestNewIAMCmd(t *testing.T) {

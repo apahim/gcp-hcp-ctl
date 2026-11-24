@@ -24,6 +24,11 @@ const (
 	workloadIdentityUserRole = "roles/iam.workloadIdentityUser"
 )
 
+// IngressServiceAccountName is the definition name of the optional
+// ingress-operator service account. Its email in a create output enables the
+// cluster Ingress capability.
+const IngressServiceAccountName = "ingress-op"
+
 // ServiceAccountDefinition defines a Google Service Account to be created and its role bindings.
 type ServiceAccountDefinition struct {
 	Name               string                 `json:"name"`
@@ -31,6 +36,13 @@ type ServiceAccountDefinition struct {
 	Description        string                 `json:"description"`
 	Roles              []string               `json:"roles"`
 	K8sServiceAccounts []K8sServiceAccountRef `json:"k8sServiceAccounts,omitempty"`
+}
+
+// optionalServiceAccountNames lists the definitions that exist in the bindings
+// file but are created only on request. They stay in the file so teardown
+// always cleans them up. The ingress-operator account is the only one today.
+var optionalServiceAccountNames = map[string]bool{
+	IngressServiceAccountName: true,
 }
 
 // K8sServiceAccountRef identifies a Kubernetes ServiceAccount for WIF binding.
@@ -59,6 +71,29 @@ func LoadServiceAccountDefinitions() ([]ServiceAccountDefinition, error) {
 	return config.ServiceAccounts, nil
 }
 
+// serviceAccountDefinitions returns the definitions to create for this cluster.
+// Optional definitions, currently only the ingress-operator account, are created
+// only when enabled through SetEnableIngress. Every other definition is always
+// created.
+func (m *Manager) serviceAccountDefinitions() ([]ServiceAccountDefinition, error) {
+	definitions, err := LoadServiceAccountDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	if m.enableIngress {
+		return definitions, nil
+	}
+
+	enabled := make([]ServiceAccountDefinition, 0, len(definitions))
+	for _, def := range definitions {
+		if optionalServiceAccountNames[def.Name] {
+			continue
+		}
+		enabled = append(enabled, def)
+	}
+	return enabled, nil
+}
+
 // Manager orchestrates IAM resource lifecycle using the GCP IAM client.
 type Manager struct {
 	projectID     string
@@ -66,6 +101,7 @@ type Manager struct {
 	infraID       string
 	oidcIssuerURL string
 	jwksFile      string
+	enableIngress bool
 
 	client *gcpiam.Client
 	logger logr.Logger
@@ -96,6 +132,12 @@ func NewManager(ctx context.Context, projectID string, infraID string, jwksFile 
 // SetOIDCIssuerURL sets a custom OIDC issuer URL.
 func (m *Manager) SetOIDCIssuerURL(url string) {
 	m.oidcIssuerURL = url
+}
+
+// SetEnableIngress enables creation of the optional ingress-operator service
+// account. When disabled, the account is neither created nor reported.
+func (m *Manager) SetEnableIngress(enable bool) {
+	m.enableIngress = enable
 }
 
 func (m *Manager) GetProjectNumber(ctx context.Context) (string, error) {
@@ -287,12 +329,13 @@ func (m *Manager) ensureProviderUsable(ctx context.Context, providerID string, e
 	return providerID, providerAudience, nil
 }
 
-// CreateServiceAccounts creates all Google Service Accounts defined in the template,
-// assigns their roles, and creates WIF bindings.
+// CreateServiceAccounts creates the Google Service Accounts defined in the
+// template, assigns their roles, and creates WIF bindings. Optional definitions
+// are created only when enabled through SetEnableIngress.
 func (m *Manager) CreateServiceAccounts(ctx context.Context) (map[string]string, error) {
 	serviceAccountEmails := make(map[string]string)
 
-	definitions, err := LoadServiceAccountDefinitions()
+	definitions, err := m.serviceAccountDefinitions()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service account definitions: %w", err)
 	}
@@ -443,7 +486,11 @@ func (m *Manager) DeleteOIDCProvider(ctx context.Context) error {
 	return nil
 }
 
-// DeleteServiceAccounts deletes all Google Service Accounts created for this cluster.
+// DeleteServiceAccounts deletes all Google Service Accounts defined for this
+// cluster, including optional definitions such as the ingress-operator account.
+// The optional accounts are deleted whether or not they were created: a delete
+// of a missing service account is tolerated. This keeps teardown complete
+// without requiring the enable flag at destroy time.
 func (m *Manager) DeleteServiceAccounts(ctx context.Context) error {
 	definitions, err := LoadServiceAccountDefinitions()
 	if err != nil {

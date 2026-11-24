@@ -337,3 +337,86 @@ func TestValidateJWKSFile(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateOutputJSONShape pins the create output JSON. The no-ingress case is
+// the pre-existing shape: it must stay byte-identical so existing automation
+// that diffs or parses the output is unaffected.
+func TestCreateOutputJSONShape(t *testing.T) {
+	base := func() *CreateOutput {
+		return &CreateOutput{
+			ProjectID:     "my-project",
+			ProjectNumber: "123456789",
+			InfraID:       "test-infra",
+			WorkloadIdentityPool: WorkloadIdentityConfig{
+				PoolID:     "test-infra-wi-pool",
+				ProviderID: "test-infra-k8s-provider",
+				Audience:   "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/test-infra-wi-pool/providers/test-infra-k8s-provider",
+			},
+			ServiceAccounts: map[string]string{
+				"cloud-controller": "test-infra-cloud-controller@my-project.iam.gserviceaccount.com",
+				"cloud-network":    "test-infra-cloud-network@my-project.iam.gserviceaccount.com",
+				"ctrlplane-op":     "test-infra-ctrlplane-op@my-project.iam.gserviceaccount.com",
+				"gcp-pd-csi":       "test-infra-gcp-pd-csi@my-project.iam.gserviceaccount.com",
+				"image-registry":   "test-infra-image-registry@my-project.iam.gserviceaccount.com",
+				"nodepool-mgmt":    "test-infra-nodepool-mgmt@my-project.iam.gserviceaccount.com",
+			},
+		}
+	}
+
+	withoutIngress := `{
+  "projectId": "my-project",
+  "projectNumber": "123456789",
+  "infraId": "test-infra",
+  "workloadIdentityPool": {
+    "poolId": "test-infra-wi-pool",
+    "providerId": "test-infra-k8s-provider",
+    "audience": "//iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/test-infra-wi-pool/providers/test-infra-k8s-provider"
+  },
+  "serviceAccounts": {
+    "cloud-controller": "test-infra-cloud-controller@my-project.iam.gserviceaccount.com",
+    "cloud-network": "test-infra-cloud-network@my-project.iam.gserviceaccount.com",
+    "ctrlplane-op": "test-infra-ctrlplane-op@my-project.iam.gserviceaccount.com",
+    "gcp-pd-csi": "test-infra-gcp-pd-csi@my-project.iam.gserviceaccount.com",
+    "image-registry": "test-infra-image-registry@my-project.iam.gserviceaccount.com",
+    "nodepool-mgmt": "test-infra-nodepool-mgmt@my-project.iam.gserviceaccount.com"
+  }
+}`
+
+	t.Run("When ingress is disabled the output should be unchanged", func(t *testing.T) {
+		opts := &CreateOptions{OutputFile: filepath.Join(t.TempDir(), "iam-output.json")}
+		if err := opts.writeOutput(base(), logr.Discard()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		data, err := os.ReadFile(opts.OutputFile)
+		if err != nil {
+			t.Fatalf("reading output file: %v", err)
+		}
+		if string(data) != withoutIngress {
+			t.Errorf("create output changed without ingress enabled:\n got: %s\nwant: %s", data, withoutIngress)
+		}
+	})
+
+	t.Run("When ingress is enabled the output should carry the ingress service account", func(t *testing.T) {
+		results := base()
+		results.ServiceAccounts[IngressServiceAccountName] = "test-infra-ingress-op@my-project.iam.gserviceaccount.com"
+
+		data, err := json.MarshalIndent(results, "", "  ")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var decoded struct {
+			ServiceAccounts map[string]string `json:"serviceAccounts"`
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("output is not valid JSON: %v", err)
+		}
+		if got := decoded.ServiceAccounts["ingress-op"]; got != "test-infra-ingress-op@my-project.iam.gserviceaccount.com" {
+			t.Errorf("expected serviceAccounts.ingress-op to be the ingress email, got %q", got)
+		}
+		if len(decoded.ServiceAccounts) != 7 {
+			t.Errorf("expected 7 service accounts, got %d", len(decoded.ServiceAccounts))
+		}
+	})
+}

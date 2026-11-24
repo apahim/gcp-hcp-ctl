@@ -408,6 +408,97 @@ func TestLoadServiceAccountDefinitions(t *testing.T) {
 			t.Errorf("expected image-registry to have 2 K8s SA bindings, got %d", len(imageRegistryDef.K8sServiceAccounts))
 		}
 	})
+
+	t.Run("When loading the optional ingress definition it should match the hypershift IAM bindings", func(t *testing.T) {
+		definitions, err := LoadServiceAccountDefinitions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var ingressDef *ServiceAccountDefinition
+		for i := range definitions {
+			if definitions[i].Name == IngressServiceAccountName {
+				ingressDef = &definitions[i]
+				break
+			}
+		}
+		if ingressDef == nil {
+			t.Fatalf("expected to find %s service account definition", IngressServiceAccountName)
+		}
+		if !optionalServiceAccountNames[IngressServiceAccountName] {
+			t.Errorf("expected %s to be the gated optional account", IngressServiceAccountName)
+		}
+		if len(ingressDef.Roles) != 1 || ingressDef.Roles[0] != "roles/dns.admin" {
+			t.Errorf("expected %s roles [roles/dns.admin], got %v", IngressServiceAccountName, ingressDef.Roles)
+		}
+		if len(ingressDef.K8sServiceAccounts) != 1 {
+			t.Fatalf("expected 1 K8s SA binding, got %d", len(ingressDef.K8sServiceAccounts))
+		}
+		if got := ingressDef.K8sServiceAccounts[0]; got.Namespace != "openshift-ingress-operator" || got.Name != "ingress-operator" {
+			t.Errorf("unexpected WIF binding %+v", got)
+		}
+	})
+}
+
+func TestManagerServiceAccountDefinitions(t *testing.T) {
+	names := func(definitions []ServiceAccountDefinition) []string {
+		got := make([]string, 0, len(definitions))
+		for _, def := range definitions {
+			got = append(got, def.Name)
+		}
+		return got
+	}
+
+	t.Run("When ingress is disabled it should skip the optional ingress account", func(t *testing.T) {
+		m := &Manager{logger: logr.Discard()}
+
+		definitions, err := m.serviceAccountDefinitions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := names(definitions)
+		if len(got) != 6 {
+			t.Fatalf("expected 6 definitions, got %d: %v", len(got), got)
+		}
+		for _, name := range got {
+			if name == IngressServiceAccountName {
+				t.Errorf("expected %s to be skipped", IngressServiceAccountName)
+			}
+		}
+	})
+
+	t.Run("When SetEnableIngress enables it the definitions should include the ingress account", func(t *testing.T) {
+		m := &Manager{logger: logr.Discard()}
+		m.SetEnableIngress(true)
+
+		definitions, err := m.serviceAccountDefinitions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := names(definitions)
+		if len(got) != 7 {
+			t.Fatalf("expected 7 definitions, got %d: %v", len(got), got)
+		}
+		if got[len(got)-1] != IngressServiceAccountName {
+			t.Errorf("expected %s to be included, got %v", IngressServiceAccountName, got)
+		}
+	})
+
+	t.Run("When SetEnableIngress is called with false after true it should skip it again", func(t *testing.T) {
+		m := &Manager{logger: logr.Discard()}
+		m.SetEnableIngress(true)
+		m.SetEnableIngress(false)
+
+		definitions, err := m.serviceAccountDefinitions()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, name := range names(definitions) {
+			if name == IngressServiceAccountName {
+				t.Errorf("expected %s to be skipped", IngressServiceAccountName)
+			}
+		}
+	})
 }
 
 func TestIsTransientIAMError(t *testing.T) {

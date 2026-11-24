@@ -25,7 +25,8 @@ func NewDestroyCommand() *cobra.Command {
 		Use:   "destroy <infra-id>",
 		Short: "Destroy GCP IAM infrastructure for a HyperShift cluster",
 		Long: `Destroy all IAM resources created for a cluster in reverse order:
-  1. Service Accounts (with role binding cleanup)
+  1. Service Accounts (with role binding cleanup), including the optional
+     ingress-operator account when it exists
   2. OIDC Provider
   3. Workload Identity Pool
 
@@ -97,7 +98,7 @@ func (o *DestroyOptions) DestroyIAM(ctx context.Context, logger logr.Logger) err
 
 func confirmDestroy(infraID, projectID string) bool {
 	fmt.Fprintf(os.Stderr, "This will destroy all IAM resources for infra-id %q in project %q.\n", infraID, projectID)
-	fmt.Fprintf(os.Stderr, "  - 6 Google Service Accounts and their role bindings\n")
+	fmt.Fprintf(os.Stderr, "  - All Google Service Accounts and their role bindings, including the optional ingress-operator account\n")
 	fmt.Fprintf(os.Stderr, "  - OIDC Provider\n")
 	fmt.Fprintf(os.Stderr, "  - Workload Identity Pool\n")
 	fmt.Fprintf(os.Stderr, "\nAre you sure? [y/N]: ")
