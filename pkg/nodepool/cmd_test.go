@@ -623,3 +623,57 @@ func TestNodepoolListShowsRegionColumn(t *testing.T) {
 		t.Errorf("list output =\n%q\nwant\n%q", out, want)
 	}
 }
+
+func TestPrintNodePoolVersions(t *testing.T) {
+	t.Run("renders target and current versions", func(t *testing.T) {
+		np := &gcpv1.NodePool{}
+		np.Name = "workers"
+		np.Spec.Release.Version = "5.0.1"
+		np.Status.Version = "5.0.0"
+
+		var buf bytes.Buffer
+		if err := printNodePool(&buf, np, "text"); err != nil {
+			t.Fatalf("printNodePool: %v", err)
+		}
+		got := buf.String()
+		for _, want := range []string{
+			"Target Version:  5.0.1",
+			"Current Version: 5.0.0",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("omits version lines when both are unset", func(t *testing.T) {
+		np := &gcpv1.NodePool{}
+		np.Name = "workers"
+
+		var buf bytes.Buffer
+		if err := printNodePool(&buf, np, "text"); err != nil {
+			t.Fatalf("printNodePool: %v", err)
+		}
+		if strings.Contains(buf.String(), "Version:") {
+			t.Errorf("unexpected version lines in output:\n%s", buf.String())
+		}
+	})
+
+	t.Run("omits current version when status version is empty", func(t *testing.T) {
+		np := &gcpv1.NodePool{}
+		np.Name = "workers"
+		np.Spec.Release.Version = "5.0.1"
+
+		var buf bytes.Buffer
+		if err := printNodePool(&buf, np, "text"); err != nil {
+			t.Fatalf("printNodePool: %v", err)
+		}
+		got := buf.String()
+		if !strings.Contains(got, "Target Version:  5.0.1\n") {
+			t.Errorf("missing target version line:\n%s", got)
+		}
+		if strings.Contains(got, "Current Version:") {
+			t.Errorf("unexpected current version line:\n%s", got)
+		}
+	})
+}

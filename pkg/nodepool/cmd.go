@@ -124,37 +124,40 @@ func printNodePool(w io.Writer, np *gcpv1.NodePool, format string) error {
 
 	bw := bufio.NewWriter(w)
 
-	fmt.Fprintf(bw, "Name:         %s\n", np.Name)
-	fmt.Fprintf(bw, "ID:           %s\n", np.UID)
-	fmt.Fprintf(bw, "Cluster:      %s\n", np.Spec.ClusterID)
-	fmt.Fprintf(bw, "Generation:   %d\n", np.Generation)
+	fmt.Fprintf(bw, "Name:            %s\n", np.Name)
+	fmt.Fprintf(bw, "ID:              %s\n", np.UID)
+	fmt.Fprintf(bw, "Cluster:         %s\n", np.Spec.ClusterID)
+	fmt.Fprintf(bw, "Generation:      %d\n", np.Generation)
 	if np.Spec.NodeCount != nil {
-		fmt.Fprintf(bw, "Replicas:     %d\n", *np.Spec.NodeCount)
+		fmt.Fprintf(bw, "Replicas:        %d\n", *np.Spec.NodeCount)
 	}
 	if np.Spec.Platform.GCP != nil {
 		if np.Spec.Platform.GCP.MachineType != "" {
-			fmt.Fprintf(bw, "Instance:     %s\n", np.Spec.Platform.GCP.MachineType)
+			fmt.Fprintf(bw, "Instance:        %s\n", np.Spec.Platform.GCP.MachineType)
 		}
 		if np.Spec.Platform.GCP.DiskSizeGB > 0 {
-			fmt.Fprintf(bw, "Disk Size:    %d GB\n", np.Spec.Platform.GCP.DiskSizeGB)
+			fmt.Fprintf(bw, "Disk Size:       %d GB\n", np.Spec.Platform.GCP.DiskSizeGB)
 		}
 		if np.Spec.Platform.GCP.DiskType != "" {
-			fmt.Fprintf(bw, "Disk Type:    %s\n", np.Spec.Platform.GCP.DiskType)
+			fmt.Fprintf(bw, "Disk Type:       %s\n", np.Spec.Platform.GCP.DiskType)
 		}
 		if np.Spec.Platform.GCP.Zone != "" {
-			fmt.Fprintf(bw, "Zone:         %s\n", np.Spec.Platform.GCP.Zone)
+			fmt.Fprintf(bw, "Zone:            %s\n", np.Spec.Platform.GCP.Zone)
 		}
 	}
 	if np.Spec.Release.Version != "" {
-		fmt.Fprintf(bw, "Version:      %s\n", np.Spec.Release.Version)
+		fmt.Fprintf(bw, "Target Version:  %s\n", np.Spec.Release.Version)
 	}
-	fmt.Fprintf(bw, "Status:       %s\n", nodePoolStatusDetail(np))
+	if np.Status.Version != "" {
+		fmt.Fprintf(bw, "Current Version: %s\n", np.Status.Version)
+	}
+	fmt.Fprintf(bw, "Status:          %s\n", nodePoolStatusDetail(np))
 	if !np.CreationTimestamp.IsZero() {
-		fmt.Fprintf(bw, "CreatedAt:    %s\n", np.CreationTimestamp.UTC().Format(time.RFC3339))
+		fmt.Fprintf(bw, "CreatedAt:       %s\n", np.CreationTimestamp.UTC().Format(time.RFC3339))
 	}
 
 	if np.DeletionTimestamp != nil {
-		fmt.Fprintf(bw, "DeletedAt:    %s\n", np.DeletionTimestamp.UTC().Format(time.RFC3339))
+		fmt.Fprintf(bw, "DeletedAt:       %s\n", np.DeletionTimestamp.UTC().Format(time.RFC3339))
 	}
 
 	if len(np.Status.Conditions) > 0 {

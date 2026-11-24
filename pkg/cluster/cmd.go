@@ -119,7 +119,7 @@ func printCluster(w io.Writer, c *gcpv1.Cluster, format string) error {
 		if c.Spec.Release.ChannelGroup != "" {
 			ver = fmt.Sprintf("%s (%s)", ver, c.Spec.Release.ChannelGroup)
 		}
-		fmt.Fprintf(bw, "Version:         %s\n", ver)
+		fmt.Fprintf(bw, "Target Version:  %s\n", ver)
 	}
 
 	if hcr := c.Status.HostedClusterResult; hcr != nil {
@@ -127,7 +127,7 @@ func printCluster(w io.Writer, c *gcpv1.Cluster, format string) error {
 			fmt.Fprintf(bw, "API Endpoint:    %s\n", hcr.APIEndpoint)
 		}
 		if hcr.Version != "" {
-			fmt.Fprintf(bw, "HC Version:      %s\n", hcr.Version)
+			fmt.Fprintf(bw, "Current Version: %s\n", hcr.Version)
 		}
 	}
 
