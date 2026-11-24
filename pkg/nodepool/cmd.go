@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/auth"
@@ -290,4 +292,26 @@ func machineType(np *gcpv1.NodePool) string {
 		return np.Spec.Platform.GCP.MachineType
 	}
 	return "-"
+}
+
+// Match the platform API's zone validation rule before deriving a region.
+var nodePoolZonePattern = regexp.MustCompile(`^[a-z]+(?:-[a-z0-9]+)*-[a-z]$`)
+
+// regionFromZone derives the GCP region from the nodepool's zone. Zones are
+// required and validated as "{region}-{zone}" (e.g. "us-central1-a"), so the
+// region is the zone minus its last hyphen-separated segment. Returns "" when
+// the zone is missing or malformed, mirroring how cluster list renders a
+// missing region.
+func regionFromZone(np *gcpv1.NodePool) string {
+	zone := ""
+	if np.Spec.Platform.GCP != nil {
+		zone = np.Spec.Platform.GCP.Zone
+	}
+	if !nodePoolZonePattern.MatchString(zone) {
+		return ""
+	}
+	if i := strings.LastIndex(zone, "-"); i > 0 {
+		return zone[:i]
+	}
+	return ""
 }

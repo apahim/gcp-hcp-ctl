@@ -435,6 +435,86 @@ func TestMachineType(t *testing.T) {
 	})
 }
 
+func TestRegionFromZone(t *testing.T) {
+	t.Run("When zone is set it should return the region prefix", func(t *testing.T) {
+		np := &gcpv1.NodePool{
+			Spec: gcpv1.NodePoolSpec{
+				Platform: gcpv1.NodePoolPlatformSpec{
+					GCP: &gcpv1.GCPNodePoolPlatform{Zone: "northamerica-northeast2-a"},
+				},
+			},
+		}
+		if got := regionFromZone(np); got != "northamerica-northeast2" {
+			t.Errorf("expected 'northamerica-northeast2', got %q", got)
+		}
+	})
+
+	t.Run("When zone has a single-segment region it should return the region", func(t *testing.T) {
+		np := &gcpv1.NodePool{
+			Spec: gcpv1.NodePoolSpec{
+				Platform: gcpv1.NodePoolPlatformSpec{
+					GCP: &gcpv1.GCPNodePoolPlatform{Zone: "us-central1-b"},
+				},
+			},
+		}
+		if got := regionFromZone(np); got != "us-central1" {
+			t.Errorf("expected 'us-central1', got %q", got)
+		}
+	})
+
+	t.Run("When GCP platform is nil it should return empty", func(t *testing.T) {
+		np := &gcpv1.NodePool{
+			Spec: gcpv1.NodePoolSpec{
+				Platform: gcpv1.NodePoolPlatformSpec{},
+			},
+		}
+		if got := regionFromZone(np); got != "" {
+			t.Errorf("expected '', got %q", got)
+		}
+	})
+
+	t.Run("When zone is empty it should return empty", func(t *testing.T) {
+		np := &gcpv1.NodePool{
+			Spec: gcpv1.NodePoolSpec{
+				Platform: gcpv1.NodePoolPlatformSpec{
+					GCP: &gcpv1.GCPNodePoolPlatform{Zone: ""},
+				},
+			},
+		}
+		if got := regionFromZone(np); got != "" {
+			t.Errorf("expected '', got %q", got)
+		}
+	})
+
+	t.Run("When zone is malformed without a hyphen it should return empty", func(t *testing.T) {
+		np := &gcpv1.NodePool{
+			Spec: gcpv1.NodePoolSpec{
+				Platform: gcpv1.NodePoolPlatformSpec{
+					GCP: &gcpv1.GCPNodePoolPlatform{Zone: "uscentral1"},
+				},
+			},
+		}
+		if got := regionFromZone(np); got != "" {
+			t.Errorf("expected '', got %q", got)
+		}
+	})
+
+	for _, zone := range []string{"us-central1-", "us-central1", "us-central1-9"} {
+		t.Run("When zone is malformed: "+zone, func(t *testing.T) {
+			np := &gcpv1.NodePool{
+				Spec: gcpv1.NodePoolSpec{
+					Platform: gcpv1.NodePoolPlatformSpec{
+						GCP: &gcpv1.GCPNodePoolPlatform{Zone: zone},
+					},
+				},
+			}
+			if got := regionFromZone(np); got != "" {
+				t.Errorf("expected empty region for %q, got %q", zone, got)
+			}
+		})
+	}
+}
+
 func executeNodepoolError(t *testing.T, code int, body string, args ...string) (error, string, string) {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -514,5 +594,32 @@ func TestNodepoolCreateInvalidSuccessDoesNotLeak(t *testing.T) {
 	}
 	if out != "" || stderr != "Error: "+want+"\n" || strings.Contains(fmt.Sprintf("%+v %s", err, stderr), "synthetic-token") {
 		t.Fatalf("output = %q / %q", out, stderr)
+	}
+}
+
+func TestNodepoolListShowsRegionColumn(t *testing.T) {
+	// A creation timestamp six days in the past keeps the rendered AGE stable
+	// ("6d"); RFC3339 formatting truncates sub-second precision downwards, so
+	// the elapsed duration can only grow past the six-day boundary.
+	created := time.Now().UTC().Add(-6 * 24 * time.Hour).Format(time.RFC3339)
+	condition := func(condType string) string {
+		return `{"type":"` + condType + `","status":"True","reason":"` + condType + `","lastTransitionTime":"` + created + `"}`
+	}
+	body := `{"apiVersion":"gcp.managed.openshift.io/v1","kind":"NodePoolList","items":[` +
+		`{"apiVersion":"gcp.managed.openshift.io/v1","kind":"NodePool",` +
+		`"metadata":{"name":"workers","creationTimestamp":"` + created + `"},` +
+		`"spec":{"clusterID":"wif3-first","nodeCount":1,"release":{"version":"5.0.2"},` +
+		`"platform":{"gcp":{"machineType":"n2-standard-4","zone":"us-central1-a"}}},` +
+		`"status":{"conditions":[` + condition("NodePoolAvailable") + `,` + condition("NodePoolHealthy") + `]}}]}`
+
+	err, out, stderr := executeNodepoolError(t, http.StatusOK, body, "list")
+	if err != nil {
+		t.Fatalf("listing nodepools: %v (stderr: %q)", err, stderr)
+	}
+
+	want := "NAME     CLUSTER     REGION       REPLICAS  INSTANCE       VERSION  STATUS  AGE\n" +
+		"workers  wif3-first  us-central1  1         n2-standard-4  5.0.2    Ready   6d\n"
+	if out != want {
+		t.Errorf("list output =\n%q\nwant\n%q", out, want)
 	}
 }
