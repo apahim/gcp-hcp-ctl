@@ -7,7 +7,7 @@ require (
 	cloud.google.com/go/workflows v1.22.1
 	github.com/ergochat/readline v0.1.3
 	github.com/go-logr/logr v1.4.4
-	github.com/openshift-online/gecko/platform-api v0.0.0-20261113163532-22fc3b21bbd5
+	github.com/openshift-online/gecko/platform-api v0.0.0-20261124082655-6358f497a697
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
 	golang.org/x/mod v0.43.0
@@ -29,7 +29,7 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.3.1 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/longrunning v1.5.0 // indirect
-	github.com/cedar-policy/cedar-go v1.9.0 // indirect
+	github.com/cedar-policy/cedar-go v1.9.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
@@ -56,8 +56,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.5 // indirect
 	golang.org/x/crypto v0.59.0 // indirect
-	golang.org/x/exp v0.0.0-20261106192419-47ce03d25ef0 // indirect
-	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/exp v0.0.0-20261121134650-e1094eeca1b5 // indirect
+	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/term v0.48.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
