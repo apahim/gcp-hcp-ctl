@@ -15,6 +15,7 @@ COPY pkg/ pkg/
 RUN set -eux; \
     case "$APP_VERSION" in refs/tags/*) APP_VERSION="${APP_VERSION#refs/tags/}";; esac; \
     [ -n "$APP_DATE" ] || APP_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; \
+    SAFE_VERSION="${APP_VERSION//\//-}"; \
     MODULE=github.com/openshift-online/gcp-hcp-ctl; \
     LDFLAGS="-X ${MODULE}/pkg/cli.version=${APP_VERSION} -X ${MODULE}/pkg/cli.commit=${APP_COMMIT} -X ${MODULE}/pkg/cli.date=${APP_DATE}"; \
     mkdir -p bin releases; \
@@ -27,7 +28,7 @@ RUN set -eux; \
       tar --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C bin gcphcpctl | gzip -n > "releases/gcphcpctl_${os}_${arch}.tar.gz"; \
       rm bin/gcphcpctl; \
     done; \
-    ( cd releases && sha256sum *.tar.gz > "gcphcpctl_${APP_VERSION}_SHA256SUMS" )
+    ( cd releases && sha256sum *.tar.gz > "gcphcpctl_${SAFE_VERSION}_SHA256SUMS" )
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
