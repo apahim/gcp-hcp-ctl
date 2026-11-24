@@ -9,15 +9,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestPlatformRoleWireTypes checks registration, decoding and round trips for CLI-local
-// catalog types.
+// TestPlatformRoleWireTypes checks registration, decoding and round trips for
+// the shared catalog types through the CLI scheme.
 func TestPlatformRoleWireTypes(t *testing.T) {
 	wire := `{"apiVersion":"gcp.managed.openshift.io/v1","kind":"PlatformRole","metadata":{"name":"future-role","creationTimestamp":"2026-01-01T00:00:00Z"},"spec":{"permissions":["cluster.get","rolebinding.list"]}}`
 	object, gvk, err := codecs.UniversalDeserializer().Decode([]byte(wire), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	role, ok := object.(*PlatformRole)
+	role, ok := object.(*gcpv1.PlatformRole)
 	if !ok || *gvk != gcpv1.GroupVersion.WithKind("PlatformRole") {
 		t.Fatalf("unexpected resource: %T %v", object, gvk)
 	}
@@ -43,7 +43,7 @@ func TestPlatformRoleWireTypes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	list, ok := object.(*PlatformRoleList)
+	list, ok := object.(*gcpv1.PlatformRoleList)
 	if !ok || *gvk != gcpv1.GroupVersion.WithKind("PlatformRoleList") || list.Continue != "next" || len(list.Items) != 1 || list.Items[0].Name != role.Name {
 		t.Fatalf("unexpected list: %#v %v", object, gvk)
 	}
@@ -52,17 +52,17 @@ func TestPlatformRoleWireTypes(t *testing.T) {
 // TestPlatformRoleWireDeepCopies checks that metadata, permissions and list items are
 // copied independently.
 func TestPlatformRoleWireDeepCopies(t *testing.T) {
-	role := &PlatformRole{ObjectMeta: metav1.ObjectMeta{Name: "reader", Annotations: map[string]string{"tracking": "original"}}, Spec: PlatformRoleSpec{Permissions: []string{"cluster.get"}}}
+	role := &gcpv1.PlatformRole{ObjectMeta: metav1.ObjectMeta{Name: "reader", Annotations: map[string]string{"tracking": "original"}}, Spec: gcpv1.PlatformRoleSpec{Permissions: []string{"cluster.get"}}}
 	original := role.DeepCopy()
-	copy := role.DeepCopyObject().(*PlatformRole)
+	copy := role.DeepCopyObject().(*gcpv1.PlatformRole)
 	copy.Annotations["tracking"] = "changed"
 	copy.Spec.Permissions[0] = "changed"
 	if !reflect.DeepEqual(role, original) {
 		t.Fatal("resource copy aliases original metadata or permissions")
 	}
 	remaining := int64(1)
-	list := &PlatformRoleList{ListMeta: metav1.ListMeta{Continue: "next", RemainingItemCount: &remaining}, Items: []PlatformRole{*role}}
-	listCopy := list.DeepCopyObject().(*PlatformRoleList)
+	list := &gcpv1.PlatformRoleList{ListMeta: metav1.ListMeta{Continue: "next", RemainingItemCount: &remaining}, Items: []gcpv1.PlatformRole{*role}}
+	listCopy := list.DeepCopyObject().(*gcpv1.PlatformRoleList)
 	*listCopy.RemainingItemCount = 0
 	listCopy.Items[0].Annotations["tracking"] = "list-copy"
 	listCopy.Items[0].Spec.Permissions[0] = "list-copy"
@@ -75,14 +75,14 @@ func TestPlatformRoleWireDeepCopies(t *testing.T) {
 			t.Fatal("copy changed nil/empty permissions")
 		}
 	}
-	for _, items := range [][]PlatformRole{nil, {}} {
+	for _, items := range [][]gcpv1.PlatformRole{nil, {}} {
 		list.Items = items
 		if !reflect.DeepEqual(list.DeepCopy().Items, items) {
 			t.Fatal("copy changed nil/empty items")
 		}
 	}
-	var nilRole *PlatformRole
-	var nilList *PlatformRoleList
+	var nilRole *gcpv1.PlatformRole
+	var nilList *gcpv1.PlatformRoleList
 	if nilRole.DeepCopy() != nil || nilRole.DeepCopyObject() != nil || nilList.DeepCopy() != nil || nilList.DeepCopyObject() != nil {
 		t.Fatal("nil copies must remain nil")
 	}
