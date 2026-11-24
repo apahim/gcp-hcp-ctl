@@ -1,10 +1,12 @@
 package iam
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/openshift-online/gcp-hcp-ctl/pkg/config"
+	"google.golang.org/api/googleapi"
 )
 
 func TestDestroyOptionsValidateInputs(t *testing.T) {
@@ -133,4 +135,74 @@ func TestNewIAMCmd(t *testing.T) {
 	if len(cmd.Commands()) != 2 {
 		t.Errorf("expected 2 subcommands, got %d", len(cmd.Commands()))
 	}
+}
+
+func TestDestroyIAM(t *testing.T) {
+	const (
+		wantProvider = "projects/test-project/locations/global/workloadIdentityPools/test-infra-wi-pool/providers/test-infra-k8s-provider"
+		wantPool     = "projects/test-project/locations/global/workloadIdentityPools/test-infra-wi-pool"
+	)
+
+	t.Run("When every step succeeds it should remove accounts, provider and pool", func(t *testing.T) {
+		client := newFakeIAMClient()
+
+		if err := destroyIAM(context.Background(), newTestManager(client, true)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(client.deletedServiceAccounts) != 7 {
+			t.Errorf("expected 7 account deletions, got %d", len(client.deletedServiceAccounts))
+		}
+		if len(client.deletedProviders) != 1 || client.deletedProviders[0] != wantProvider {
+			t.Errorf("expected provider %q to be deleted, got %v", wantProvider, client.deletedProviders)
+		}
+		if len(client.deletedPools) != 1 || client.deletedPools[0] != wantPool {
+			t.Errorf("expected pool %q to be deleted, got %v", wantPool, client.deletedPools)
+		}
+	})
+
+	t.Run("When role removal fails it should still delete the provider and the pool", func(t *testing.T) {
+		client := newFakeIAMClient()
+		client.removeRolesErr = &googleapi.Error{Code: 403, Message: "permission denied"}
+
+		err := destroyIAM(context.Background(), newTestManager(client, true))
+		if err == nil {
+			t.Fatal("expected an error when role removal fails")
+		}
+		if !strings.Contains(err.Error(), "failed to remove role bindings") {
+			t.Errorf("expected the role-binding failure to be reported, got %v", err)
+		}
+		if len(client.deletedProviders) != 1 {
+			t.Errorf("expected the OIDC provider to be deleted despite the failure, got %v", client.deletedProviders)
+		}
+		if len(client.deletedPools) != 1 {
+			t.Errorf("expected the pool to be deleted despite the failure, got %v", client.deletedPools)
+		}
+		if len(client.deletedServiceAccounts) != 7 {
+			t.Errorf("expected all accounts to be deleted, got %d", len(client.deletedServiceAccounts))
+		}
+	})
+
+	t.Run("When every step fails it should report all failures together", func(t *testing.T) {
+		client := newFakeIAMClient()
+		client.removeRolesErr = &googleapi.Error{Code: 403, Message: "permission denied"}
+		client.deleteSAErr = func(string) error {
+			return &googleapi.Error{Code: 500, Message: "backend error"}
+		}
+		client.deleteProvErr = &googleapi.Error{Code: 500, Message: "backend error"}
+		client.deletePoolErr = &googleapi.Error{Code: 500, Message: "backend error"}
+
+		err := destroyIAM(context.Background(), newTestManager(client, true))
+		if err == nil {
+			t.Fatal("expected an error when every step fails")
+		}
+		for _, want := range []string{
+			"failed to delete service accounts",
+			"failed to delete OIDC provider",
+			"failed to delete workload identity pool",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("expected error to contain %q, got %v", want, err)
+			}
+		}
+	})
 }

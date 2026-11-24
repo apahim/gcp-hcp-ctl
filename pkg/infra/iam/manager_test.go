@@ -770,6 +770,8 @@ func TestCompareJWKS(t *testing.T) {
 // failures per operation.
 type fakeIAMClient struct {
 	deletedServiceAccounts []string
+	deletedProviders       []string
+	deletedPools           []string
 	removedRoleMembers     map[string][]string
 	createdServiceAccounts map[string]bool
 	addedRoleMembers       map[string][]string
@@ -778,6 +780,8 @@ type fakeIAMClient struct {
 
 	removeRolesErr error
 	deleteSAErr    func(resource string) error
+	deleteProvErr  error
+	deletePoolErr  error
 }
 
 func newFakeIAMClient() *fakeIAMClient {
@@ -805,7 +809,13 @@ func (f *fakeIAMClient) PatchWorkloadIdentityPool(context.Context, string, *iama
 
 func (f *fakeIAMClient) UndeleteWorkloadIdentityPool(context.Context, string) error { return nil }
 
-func (f *fakeIAMClient) DeleteWorkloadIdentityPool(context.Context, string) error { return nil }
+func (f *fakeIAMClient) DeleteWorkloadIdentityPool(_ context.Context, resource string) error {
+	if f.deletePoolErr != nil {
+		return f.deletePoolErr
+	}
+	f.deletedPools = append(f.deletedPools, resource)
+	return nil
+}
 
 func (f *fakeIAMClient) CreateWorkloadIdentityProvider(context.Context, string, string, *iamapi.WorkloadIdentityPoolProvider) error {
 	return nil
@@ -821,7 +831,13 @@ func (f *fakeIAMClient) UpdateWorkloadIdentityProvider(context.Context, string, 
 
 func (f *fakeIAMClient) UndeleteWorkloadIdentityProvider(context.Context, string) error { return nil }
 
-func (f *fakeIAMClient) DeleteWorkloadIdentityProvider(context.Context, string) error { return nil }
+func (f *fakeIAMClient) DeleteWorkloadIdentityProvider(_ context.Context, resource string) error {
+	if f.deleteProvErr != nil {
+		return f.deleteProvErr
+	}
+	f.deletedProviders = append(f.deletedProviders, resource)
+	return nil
+}
 
 func (f *fakeIAMClient) CreateServiceAccount(_ context.Context, accountID string, _ *iamapi.ServiceAccount) (*iamapi.ServiceAccount, error) {
 	f.createdServiceAccounts[accountID] = true

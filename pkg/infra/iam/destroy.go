@@ -3,6 +3,7 @@ package iam
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -30,7 +31,9 @@ func NewDestroyCommand() *cobra.Command {
   2. OIDC Provider
   3. Workload Identity Pool
 
-All delete operations tolerate not-found errors (idempotent).`,
+All delete operations tolerate not-found errors (idempotent). A failure does not
+stop the remaining steps: the OIDC provider and pool are still removed, and all
+errors are reported together at the end.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
@@ -82,18 +85,30 @@ func (o *DestroyOptions) DestroyIAM(ctx context.Context, logger logr.Logger) err
 		return fmt.Errorf("failed to initialize GCP clients: %w", err)
 	}
 
+	return destroyIAM(ctx, iamManager)
+}
+
+// destroyIAM removes every IAM resource for the cluster in reverse dependency
+// order. It does not stop at the first failure: a stuck service account must not
+// strand the OIDC provider or the Workload Identity Pool, which are the pieces
+// that keep the infrastructure consumable. Every failure is reported together at
+// the end, so a non-nil error still means teardown is incomplete.
+func destroyIAM(ctx context.Context, iamManager *Manager) error {
+	var destroyErrors []error
+
 	if err := iamManager.DeleteServiceAccounts(ctx); err != nil {
-		return fmt.Errorf("failed to delete service accounts: %w", err)
+		destroyErrors = append(destroyErrors, fmt.Errorf("failed to delete service accounts: %w", err))
 	}
 
 	if err := iamManager.DeleteOIDCProvider(ctx); err != nil {
-		return fmt.Errorf("failed to delete OIDC provider: %w", err)
+		destroyErrors = append(destroyErrors, fmt.Errorf("failed to delete OIDC provider: %w", err))
 	}
 
 	if err := iamManager.DeleteWorkloadIdentityPool(ctx); err != nil {
-		return fmt.Errorf("failed to delete workload identity pool: %w", err)
+		destroyErrors = append(destroyErrors, fmt.Errorf("failed to delete workload identity pool: %w", err))
 	}
-	return nil
+
+	return errors.Join(destroyErrors...)
 }
 
 func confirmDestroy(infraID, projectID string) bool {
