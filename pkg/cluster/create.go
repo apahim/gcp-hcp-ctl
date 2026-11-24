@@ -449,7 +449,7 @@ func assemblePayload(iamOutput *iam.CreateOutput, netOutput *network.CreateOutpu
 					},
 				},
 			},
-			Release: gcpv1.ReleaseSpec{
+			Release: gcpv1.ClusterReleaseSpec{
 				Version:      opts.version,
 				ChannelGroup: opts.channelGroup,
 			},
