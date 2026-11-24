@@ -483,3 +483,256 @@ func TestNetworkCreateOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestAssemblePayloadIngress(t *testing.T) {
+	const ingressEmail = "test-infra-ingress-op@my-project.iam.gserviceaccount.com"
+
+	opts := func() buildPayloadOptions {
+		return buildPayloadOptions{
+			clusterName:    "test-cluster",
+			infraID:        "test-infra",
+			projectID:      "my-project",
+			region:         "us-central1",
+			endpointAccess: "PublicAndPrivate",
+			oidcEndpoint:   "https://oidc.example.com",
+			version:        "4.22.0",
+			channelGroup:   "candidate",
+		}
+	}
+	netOutput := &network.CreateOutput{NetworkName: "my-vpc", SubnetName: "my-subnet"}
+
+	t.Run("When the IAM config has no ingress account it should omit ingressEmail", func(t *testing.T) {
+		cluster, err := assemblePayload(validIAMOutput(), netOutput, opts())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := cluster.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsRef.IngressEmail; got != nil {
+			t.Errorf("expected ingressEmail to be nil, got %q", *got)
+		}
+
+		data, err := json.Marshal(cluster)
+		if err != nil {
+			t.Fatalf("marshaling payload: %v", err)
+		}
+		if strings.Contains(string(data), "ingressEmail") {
+			t.Errorf("expected payload to omit ingressEmail, got %s", data)
+		}
+	})
+
+	t.Run("When the IAM config has the ingress account it should set ingressEmail", func(t *testing.T) {
+		iamOutput := validIAMOutput()
+		iamOutput.ServiceAccounts[iam.IngressServiceAccountName] = ingressEmail
+
+		cluster, err := assemblePayload(iamOutput, netOutput, opts())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ref := cluster.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsRef.IngressEmail
+		if ref == nil {
+			t.Fatal("expected ingressEmail to be set")
+		}
+		if *ref != ingressEmail {
+			t.Errorf("expected ingressEmail %q, got %q", ingressEmail, *ref)
+		}
+
+		data, err := json.Marshal(cluster)
+		if err != nil {
+			t.Fatalf("marshaling payload: %v", err)
+		}
+		if !strings.Contains(string(data), `"ingressEmail":"`+ingressEmail+`"`) {
+			t.Errorf("expected payload to carry ingressEmail, got %s", data)
+		}
+	})
+
+	t.Run("When enable-ingress is set without an ingress account it should fail", func(t *testing.T) {
+		o := opts()
+		o.enableIngress = true
+
+		_, err := assemblePayload(validIAMOutput(), netOutput, o)
+		if err == nil || !strings.Contains(err.Error(), "iam create --enable-ingress") {
+			t.Fatalf("expected an actionable ingress service account error, got %v", err)
+		}
+	})
+
+	t.Run("When enable-ingress is set and the IAM config has the account it should succeed", func(t *testing.T) {
+		iamOutput := validIAMOutput()
+		iamOutput.ServiceAccounts[iam.IngressServiceAccountName] = ingressEmail
+		o := opts()
+		o.enableIngress = true
+
+		cluster, err := assemblePayload(iamOutput, netOutput, o)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cluster.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsRef.IngressEmail == nil {
+			t.Error("expected ingressEmail to be set")
+		}
+	})
+}
+
+func TestBuildPayloadFromConfigsIngress(t *testing.T) {
+	const ingressEmail = "my-infra-ingress-op@my-project.iam.gserviceaccount.com"
+
+	writeConfigs := func(t *testing.T, withIngress bool) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+
+		iamConfig := validIAMOutput()
+		iamConfig.InfraID = "my-infra"
+		if withIngress {
+			iamConfig.ServiceAccounts[iam.IngressServiceAccountName] = ingressEmail
+		}
+		iamData, err := json.Marshal(iamConfig)
+		if err != nil {
+			t.Fatalf("marshaling IAM config: %v", err)
+		}
+		iamFile := filepath.Join(dir, "iam.json")
+		if err := os.WriteFile(iamFile, iamData, 0644); err != nil {
+			t.Fatalf("writing IAM config: %v", err)
+		}
+
+		netData, err := json.Marshal(map[string]string{
+			"region":      "us-central1",
+			"networkName": "net-1",
+			"subnetName":  "sub-1",
+		})
+		if err != nil {
+			t.Fatalf("marshaling network config: %v", err)
+		}
+		netFile := filepath.Join(dir, "net.json")
+		if err := os.WriteFile(netFile, netData, 0644); err != nil {
+			t.Fatalf("writing network config: %v", err)
+		}
+
+		return iamFile, netFile
+	}
+
+	opts := buildPayloadOptions{
+		clusterName:    "my-cluster",
+		infraID:        "generated-id",
+		endpointAccess: "PublicAndPrivate",
+		oidcEndpoint:   "https://oidc.test",
+		version:        "4.21.0",
+		channelGroup:   "stable",
+	}
+
+	t.Run("When the IAM config file carries the ingress account it should set ingressEmail", func(t *testing.T) {
+		iamFile, netFile := writeConfigs(t, true)
+
+		cluster, err := buildPayloadFromConfigs(iamFile, netFile, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ref := cluster.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsRef.IngressEmail
+		if ref == nil {
+			t.Fatal("expected ingressEmail to be set from the IAM config")
+		}
+		if *ref != ingressEmail {
+			t.Errorf("expected ingressEmail %q, got %q", ingressEmail, *ref)
+		}
+	})
+
+	t.Run("When the IAM config file has no ingress account it should omit ingressEmail", func(t *testing.T) {
+		iamFile, netFile := writeConfigs(t, false)
+
+		cluster, err := buildPayloadFromConfigs(iamFile, netFile, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := cluster.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsRef.IngressEmail; got != nil {
+			t.Errorf("expected ingressEmail to be nil, got %q", *got)
+		}
+	})
+
+	t.Run("When enable-ingress is set but the IAM config file has no ingress account it should fail", func(t *testing.T) {
+		iamFile, netFile := writeConfigs(t, false)
+		withFlag := opts
+		withFlag.enableIngress = true
+
+		_, err := buildPayloadFromConfigs(iamFile, netFile, withFlag)
+		if err == nil || !strings.Contains(err.Error(), "iam create --enable-ingress") {
+			t.Fatalf("expected an actionable ingress service account error, got %v", err)
+		}
+	})
+
+	t.Run("When the IAM config carries a whitespace-only ingress account it should omit ingressEmail", func(t *testing.T) {
+		dir := t.TempDir()
+		iamConfig := validIAMOutput()
+		iamConfig.InfraID = "my-infra"
+		iamConfig.ServiceAccounts[iam.IngressServiceAccountName] = "   "
+		iamData, err := json.Marshal(iamConfig)
+		if err != nil {
+			t.Fatalf("marshaling IAM config: %v", err)
+		}
+		iamFile := filepath.Join(dir, "iam.json")
+		if err := os.WriteFile(iamFile, iamData, 0644); err != nil {
+			t.Fatalf("writing IAM config: %v", err)
+		}
+		netData, err := json.Marshal(map[string]string{
+			"region":      "us-central1",
+			"networkName": "net-1",
+			"subnetName":  "sub-1",
+		})
+		if err != nil {
+			t.Fatalf("marshaling network config: %v", err)
+		}
+		netFile := filepath.Join(dir, "net.json")
+		if err := os.WriteFile(netFile, netData, 0644); err != nil {
+			t.Fatalf("writing network config: %v", err)
+		}
+
+		cluster, err := buildPayloadFromConfigs(iamFile, netFile, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := cluster.Spec.Platform.GCP.WorkloadIdentity.ServiceAccountsRef.IngressEmail; got != nil {
+			t.Errorf("expected ingressEmail to be nil, got %q", *got)
+		}
+	})
+}
+
+func TestNewCreateCmdEnableIngressFlag(t *testing.T) {
+	cmd := newCreateCmd()
+
+	flag := cmd.Flag("enable-ingress")
+	if flag == nil {
+		t.Fatal("expected enable-ingress flag to be defined")
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("expected enable-ingress to default to false, got %q", flag.DefValue)
+	}
+}
+
+func TestIAMCreateOptions(t *testing.T) {
+	tests := []struct {
+		name          string
+		enableIngress bool
+	}{
+		{name: "When ingress is disabled it should not request the ingress account", enableIngress: false},
+		{name: "When ingress is enabled it should request the ingress account", enableIngress: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := iamCreateOptions(buildPayloadOptions{
+				projectID:     "test-project",
+				infraID:       "test-infra",
+				oidcEndpoint:  "https://oidc.example.com",
+				enableIngress: tt.enableIngress,
+			})
+
+			if opts.EnableIngress != tt.enableIngress {
+				t.Errorf("expected iam options EnableIngress %v, got %v", tt.enableIngress, opts.EnableIngress)
+			}
+			if opts.ProjectID != "test-project" {
+				t.Errorf("expected project ID %q, got %q", "test-project", opts.ProjectID)
+			}
+			if opts.InfraID != "test-infra" {
+				t.Errorf("expected infra ID %q, got %q", "test-infra", opts.InfraID)
+			}
+			if opts.OIDCIssuerURL != "https://oidc.example.com/test-infra" {
+				t.Errorf("expected issuer URL to be forwarded, got %q", opts.OIDCIssuerURL)
+			}
+		})
+	}
+}

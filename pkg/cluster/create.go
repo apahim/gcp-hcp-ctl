@@ -70,6 +70,7 @@ type createOptions struct {
 	iamConfigFile     string
 	networkConfigFile string
 	setupInfra        bool
+	enableIngress     bool
 	endpointAccess    string
 	version           string
 	channelGroup      string
@@ -98,7 +99,15 @@ Two modes of operation:
        --setup-infra --project my-project \
        --version 4.22.0-rc.5 --channel-group candidate
 
-Both --iam-config-file and --network-config-file are required in config-file mode.`,
+Both --iam-config-file and --network-config-file are required in config-file mode.
+
+The cluster Ingress capability is enabled only when the IAM config carries an
+ingress-operator service account (serviceAccounts.ingress-op), which
+'gcphcpctl iam create --enable-ingress' adds to its output. In config-file mode
+that field alone decides, and --enable-ingress only asserts it is there. With
+--setup-infra, --enable-ingress creates that account and enables Ingress in one
+step. Without the account the ingressEmail field is omitted and Ingress stays
+disabled.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("cluster name is required\n\nUsage: %s", cmd.UseLine())
@@ -114,6 +123,7 @@ Both --iam-config-file and --network-config-file are required in config-file mod
 	cmd.Flags().StringVar(&opts.iamConfigFile, "iam-config-file", "", "Path to IAM config JSON from 'gcphcpctl iam create'")
 	cmd.Flags().StringVar(&opts.networkConfigFile, "network-config-file", "", "Path to network config JSON from 'gcphcpctl network create'")
 	cmd.Flags().BoolVar(&opts.setupInfra, "setup-infra", false, "Automatically provision IAM and network infrastructure before creating cluster")
+	cmd.Flags().BoolVar(&opts.enableIngress, "enable-ingress", false, "Enable the cluster Ingress capability; needs serviceAccounts.ingress-op in the IAM config, created with 'iam create --enable-ingress' or by --setup-infra")
 	cmd.Flags().StringVar(&opts.endpointAccess, "endpoint-access", "PublicAndPrivate", "API server endpoint access: Private or PublicAndPrivate")
 	cmd.Flags().StringVar(&opts.version, "version", "", "OCP version (e.g. 4.22.0-rc.5)")
 	cmd.Flags().StringVar(&opts.channelGroup, "channel-group", "stable", "Release channel group")
@@ -174,6 +184,7 @@ func (o *createOptions) run(cmd *cobra.Command, clusterName string) error {
 		oidcEndpoint:   oidcBase,
 		version:        o.version,
 		channelGroup:   o.channelGroup,
+		enableIngress:  o.enableIngress,
 	}
 
 	var cluster *gcpv1.Cluster
@@ -262,6 +273,7 @@ type buildPayloadOptions struct {
 	oidcEndpoint   string
 	version        string
 	channelGroup   string
+	enableIngress  bool
 }
 
 func (o buildPayloadOptions) issuerURL() string {
@@ -318,6 +330,18 @@ func networkCreateOptions(opts buildPayloadOptions) *network.CreateOptions {
 	}
 }
 
+// iamCreateOptions builds the IAM setup options for --setup-infra. --enable-ingress
+// is forwarded so step 1 creates the ingress-operator service account whose
+// email then enables Ingress in the payload.
+func iamCreateOptions(opts buildPayloadOptions) *iam.CreateOptions {
+	return &iam.CreateOptions{
+		ProjectID:     opts.projectID,
+		InfraID:       opts.infraID,
+		OIDCIssuerURL: opts.issuerURL(),
+		EnableIngress: opts.enableIngress,
+	}
+}
+
 func buildPayloadWithInfraSetup(ctx context.Context, w io.Writer, opts buildPayloadOptions) (*gcpv1.Cluster, error) {
 	if opts.projectID == "" {
 		return nil, fmt.Errorf("--project is required with --setup-infra (or set GCPHCPCTL_PROJECT or project in config)")
@@ -325,11 +349,7 @@ func buildPayloadWithInfraSetup(ctx context.Context, w io.Writer, opts buildPayl
 	logger := logr.FromSlogHandler(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	fmt.Fprintln(w, ">>> Step 1: Setup IAM infrastructure")
-	iamOpts := &iam.CreateOptions{
-		ProjectID:     opts.projectID,
-		InfraID:       opts.infraID,
-		OIDCIssuerURL: opts.issuerURL(),
-	}
+	iamOpts := iamCreateOptions(opts)
 	iamOutput, err := iamOpts.CreateIAM(ctx, logger)
 	if err != nil {
 		return nil, fmt.Errorf("IAM setup failed: %w", err)
@@ -384,6 +404,14 @@ func assemblePayload(iamOutput *iam.CreateOutput, netOutput *network.CreateOutpu
 		return nil, err
 	}
 
+	// Ingress is opt-in: the payload carries ingressEmail only when the IAM
+	// config provides the ingress-operator service account. The field is
+	// immutable and Ingress cannot be enabled after cluster creation.
+	ingressEmail := strings.TrimSpace(iamOutput.ServiceAccounts[iam.IngressServiceAccountName])
+	if opts.enableIngress && ingressEmail == "" {
+		return nil, fmt.Errorf("IAM config missing required service account: %s (create the IAM config with 'gcphcpctl iam create --enable-ingress')", iam.IngressServiceAccountName)
+	}
+
 	issuerURL := opts.issuerURL()
 
 	cluster := &gcpv1.Cluster{
@@ -416,11 +444,12 @@ func assemblePayload(iamOutput *iam.CreateOutput, netOutput *network.CreateOutpu
 							StorageEmail:         iamOutput.ServiceAccounts["gcp-pd-csi"],
 							ImageRegistryEmail:   iamOutput.ServiceAccounts["image-registry"],
 							NetworkEmail:         iamOutput.ServiceAccounts["cloud-network"],
+							IngressEmail:         ingressEmailRef(ingressEmail),
 						},
 					},
 				},
 			},
-			Release: gcpv1.ReleaseSpec{
+			Release: gcpv1.ClusterReleaseSpec{
 				Version:      opts.version,
 				ChannelGroup: opts.channelGroup,
 			},
@@ -428,4 +457,13 @@ func assemblePayload(iamOutput *iam.CreateOutput, netOutput *network.CreateOutpu
 	}
 
 	return cluster, nil
+}
+
+// ingressEmailRef returns a pointer to email, or nil when email is empty, so the
+// field is omitted from the payload and Ingress stays disabled.
+func ingressEmailRef(email string) *string {
+	if email == "" {
+		return nil
+	}
+	return &email
 }

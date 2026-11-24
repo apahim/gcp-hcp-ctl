@@ -24,6 +24,11 @@ const (
 	workloadIdentityUserRole = "roles/iam.workloadIdentityUser"
 )
 
+// IngressServiceAccountName is the definition name of the optional
+// ingress-operator service account. Its email in a create output enables the
+// cluster Ingress capability.
+const IngressServiceAccountName = "ingress-op"
+
 // ServiceAccountDefinition defines a Google Service Account to be created and its role bindings.
 type ServiceAccountDefinition struct {
 	Name               string                 `json:"name"`
@@ -31,6 +36,13 @@ type ServiceAccountDefinition struct {
 	Description        string                 `json:"description"`
 	Roles              []string               `json:"roles"`
 	K8sServiceAccounts []K8sServiceAccountRef `json:"k8sServiceAccounts,omitempty"`
+}
+
+// optionalServiceAccountNames lists the definitions that exist in the bindings
+// file but are created only on request. They stay in the file so teardown
+// always cleans them up. The ingress-operator account is the only one today.
+var optionalServiceAccountNames = map[string]bool{
+	IngressServiceAccountName: true,
 }
 
 // K8sServiceAccountRef identifies a Kubernetes ServiceAccount for WIF binding.
@@ -59,6 +71,51 @@ func LoadServiceAccountDefinitions() ([]ServiceAccountDefinition, error) {
 	return config.ServiceAccounts, nil
 }
 
+// serviceAccountDefinitions returns the definitions to create for this cluster.
+// Optional definitions, currently only the ingress-operator account, are created
+// only when enabled through SetEnableIngress. Every other definition is always
+// created.
+func (m *Manager) serviceAccountDefinitions() ([]ServiceAccountDefinition, error) {
+	definitions, err := LoadServiceAccountDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	if m.enableIngress {
+		return definitions, nil
+	}
+
+	enabled := make([]ServiceAccountDefinition, 0, len(definitions))
+	for _, def := range definitions {
+		if optionalServiceAccountNames[def.Name] {
+			continue
+		}
+		enabled = append(enabled, def)
+	}
+	return enabled, nil
+}
+
+// iamClient is the immutable set of GCP IAM calls the Manager makes. It exists
+// so create and teardown paths can be tested without a GCP project; *gcpiam.Client
+// is the only production implementation.
+type iamClient interface {
+	GetProjectNumber(ctx context.Context) (int64, error)
+	CreateWorkloadIdentityPool(ctx context.Context, parent, poolID string, pool *iamapi.WorkloadIdentityPool) error
+	GetWorkloadIdentityPool(ctx context.Context, resource string) (*iamapi.WorkloadIdentityPool, error)
+	PatchWorkloadIdentityPool(ctx context.Context, resource string, pool *iamapi.WorkloadIdentityPool, updateMask string) error
+	UndeleteWorkloadIdentityPool(ctx context.Context, resource string) error
+	DeleteWorkloadIdentityPool(ctx context.Context, resource string) error
+	CreateWorkloadIdentityProvider(ctx context.Context, parent, providerID string, provider *iamapi.WorkloadIdentityPoolProvider) error
+	GetWorkloadIdentityProvider(ctx context.Context, resource string) (*iamapi.WorkloadIdentityPoolProvider, error)
+	UpdateWorkloadIdentityProvider(ctx context.Context, resource string, provider *iamapi.WorkloadIdentityPoolProvider, updateMask string) error
+	UndeleteWorkloadIdentityProvider(ctx context.Context, resource string) error
+	DeleteWorkloadIdentityProvider(ctx context.Context, resource string) error
+	CreateServiceAccount(ctx context.Context, accountID string, sa *iamapi.ServiceAccount) (*iamapi.ServiceAccount, error)
+	DeleteServiceAccount(ctx context.Context, resource string) error
+	AddProjectIAMRoles(ctx context.Context, member string, roles []string) ([]string, error)
+	RemoveProjectIAMRoles(ctx context.Context, member string, roles []string) ([]string, error)
+	AddServiceAccountIAMRoles(ctx context.Context, resource, member string, roles []string) ([]string, error)
+}
+
 // Manager orchestrates IAM resource lifecycle using the GCP IAM client.
 type Manager struct {
 	projectID     string
@@ -66,8 +123,9 @@ type Manager struct {
 	infraID       string
 	oidcIssuerURL string
 	jwksFile      string
+	enableIngress bool
 
-	client *gcpiam.Client
+	client iamClient
 	logger logr.Logger
 }
 
@@ -96,6 +154,12 @@ func NewManager(ctx context.Context, projectID string, infraID string, jwksFile 
 // SetOIDCIssuerURL sets a custom OIDC issuer URL.
 func (m *Manager) SetOIDCIssuerURL(url string) {
 	m.oidcIssuerURL = url
+}
+
+// SetEnableIngress enables creation of the optional ingress-operator service
+// account. When disabled, the account is neither created nor reported.
+func (m *Manager) SetEnableIngress(enable bool) {
+	m.enableIngress = enable
 }
 
 func (m *Manager) GetProjectNumber(ctx context.Context) (string, error) {
@@ -287,12 +351,13 @@ func (m *Manager) ensureProviderUsable(ctx context.Context, providerID string, e
 	return providerID, providerAudience, nil
 }
 
-// CreateServiceAccounts creates all Google Service Accounts defined in the template,
-// assigns their roles, and creates WIF bindings.
+// CreateServiceAccounts creates the Google Service Accounts defined in the
+// template, assigns their roles, and creates WIF bindings. Optional definitions
+// are created only when enabled through SetEnableIngress.
 func (m *Manager) CreateServiceAccounts(ctx context.Context) (map[string]string, error) {
 	serviceAccountEmails := make(map[string]string)
 
-	definitions, err := LoadServiceAccountDefinitions()
+	definitions, err := m.serviceAccountDefinitions()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service account definitions: %w", err)
 	}
@@ -443,7 +508,13 @@ func (m *Manager) DeleteOIDCProvider(ctx context.Context) error {
 	return nil
 }
 
-// DeleteServiceAccounts deletes all Google Service Accounts created for this cluster.
+// DeleteServiceAccounts deletes all Google Service Accounts defined for this
+// cluster, including optional definitions such as the ingress-operator account.
+// The optional accounts are deleted whether or not they were created: a delete
+// of a missing service account is tolerated. This keeps teardown complete
+// without requiring the enable flag at destroy time. Role-binding removal
+// failures are reported alongside account-deletion failures, because leaving a
+// project binding behind means teardown did not finish.
 func (m *Manager) DeleteServiceAccounts(ctx context.Context) error {
 	definitions, err := LoadServiceAccountDefinitions()
 	if err != nil {
@@ -456,9 +527,13 @@ func (m *Manager) DeleteServiceAccounts(ctx context.Context) error {
 		email := m.formatServiceAccountEmail(def.Name)
 		m.logger.V(1).Info("Deleting service account", "name", def.Name, "email", email)
 
+		// Remove role bindings before deleting the account so no binding is left
+		// pointing at a deleted service account. A failure here means teardown is
+		// incomplete and must be reported, but the remaining accounts still get
+		// their chance to be cleaned up.
 		if len(def.Roles) > 0 {
 			if err := m.removeRoles(ctx, email, def.Roles); err != nil {
-				m.logger.Error(err, "Failed to remove role bindings, continuing with deletion", "email", email)
+				deleteErrors = append(deleteErrors, fmt.Errorf("failed to remove role bindings for %s: %w", email, err))
 			}
 		}
 

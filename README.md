@@ -40,6 +40,18 @@ gcphcpctl cluster create my-cluster \
   --setup-infra --project my-project \
   --version 4.22.0-rc.5 --channel-group candidate
 
+# Enable the cluster Ingress capability (*.apps DNS, default wildcard certificate)
+# iam-config.json must come from 'gcphcpctl iam create --enable-ingress'
+gcphcpctl cluster create my-cluster \
+  --iam-config-file iam-config.json \
+  --network-config-file network-config.json \
+  --version 4.22.0-rc.5 --channel-group candidate --enable-ingress
+
+# Same in one step: create the ingress account during --setup-infra
+gcphcpctl cluster create my-cluster \
+  --setup-infra --project my-project --enable-ingress \
+  --version 4.22.0-rc.5 --channel-group candidate
+
 # Dry run (show payload without creating)
 gcphcpctl cluster create my-cluster \
   --iam-config-file iam-config.json \
@@ -234,6 +246,9 @@ gcphcpctl iam create <infra-id> --oidc-issuer-url https://oidc.example.com/my-cl
 gcphcpctl iam create <infra-id> --oidc-jwks-file /path/to/jwks.json
 gcphcpctl iam create <infra-id> --oidc-issuer-url https://oidc.example.com --output-file iam-output.json
 
+# Also create the optional ingress-operator service account
+gcphcpctl iam create <infra-id> --oidc-issuer-url https://oidc.example.com --enable-ingress
+
 # Destroy IAM infrastructure for a cluster
 gcphcpctl iam destroy <infra-id>
 gcphcpctl iam destroy <infra-id> --yes    # skip confirmation prompt
@@ -246,6 +261,43 @@ The `ctrlplane-op` service account is granted `roles/compute.securityAdmin` so
 the control-plane-operator can manage the worker firewall rule. Re-run
 `gcphcpctl iam create <infra-id>` on clusters created before this grant existed
 to apply it.
+
+#### Optional Ingress service account
+
+The cluster Ingress capability is opt-in. `--enable-ingress` additionally
+creates the `ingress-op` service account (project role `roles/dns.admin`, WIF
+binding to `openshift-ingress-operator/ingress-operator`) and reports its email
+in the create output as `serviceAccounts.ingress-op`:
+
+```json
+{
+  "serviceAccounts": {
+    "ctrlplane-op": "<infra-id>-ctrlplane-op@<project>.iam.gserviceaccount.com",
+    "ingress-op": "<infra-id>-ingress-op@<project>.iam.gserviceaccount.com"
+  }
+}
+```
+
+Without the flag no ingress account is created and the output keeps its previous
+shape, so existing automation is unaffected. `cluster create` sets
+`spec.platform.gcp.workloadIdentity.serviceAccountsRef.ingressEmail` from that
+field, and only then does the platform enable Ingress: the guest ingress operator
+publishes the `*.apps` Cloud DNS records and the platform stages the default
+wildcard certificate via ACME DNS-01 delegation. `ingressEmail` is immutable, so
+Ingress cannot be turned on after cluster creation.
+
+In config-file mode, the presence of `serviceAccounts.ingress-op` decides whether
+Ingress is enabled; `--enable-ingress` only asserts that the account is there and
+fails otherwise. With `--setup-infra`, `--enable-ingress` creates the account and
+enables Ingress in one step.
+
+Role definitions live in `pkg/infra/iam/iam-bindings.json`. The `ingress-op` entry
+matches [openshift/hypershift#9958](https://github.com/openshift/hypershift/pull/9958)
+exactly; gcp-hcp-ctl differs only in keeping it out of the default create path
+unless `--enable-ingress` is passed, while `iam destroy` always cleans it up.
+
+`iam destroy` deletes every definition, including the optional ingress account,
+whether or not it was created; missing service accounts are tolerated.
 
 ### Network Infrastructure for Hosted Clusters (`network`)
 

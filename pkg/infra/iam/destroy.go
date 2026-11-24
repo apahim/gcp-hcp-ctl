@@ -3,6 +3,7 @@ package iam
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,11 +26,14 @@ func NewDestroyCommand() *cobra.Command {
 		Use:   "destroy <infra-id>",
 		Short: "Destroy GCP IAM infrastructure for a HyperShift cluster",
 		Long: `Destroy all IAM resources created for a cluster in reverse order:
-  1. Service Accounts (with role binding cleanup)
+  1. Service Accounts (with role binding cleanup), including the optional
+     ingress-operator account when it exists
   2. OIDC Provider
   3. Workload Identity Pool
 
-All delete operations tolerate not-found errors (idempotent).`,
+All delete operations tolerate not-found errors (idempotent). A failure does not
+stop the remaining steps: the OIDC provider and pool are still removed, and all
+errors are reported together at the end.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
@@ -81,23 +85,35 @@ func (o *DestroyOptions) DestroyIAM(ctx context.Context, logger logr.Logger) err
 		return fmt.Errorf("failed to initialize GCP clients: %w", err)
 	}
 
+	return destroyIAM(ctx, iamManager)
+}
+
+// destroyIAM removes every IAM resource for the cluster in reverse dependency
+// order. It does not stop at the first failure: a stuck service account must not
+// strand the OIDC provider or the Workload Identity Pool, which are the pieces
+// that keep the infrastructure consumable. Every failure is reported together at
+// the end, so a non-nil error still means teardown is incomplete.
+func destroyIAM(ctx context.Context, iamManager *Manager) error {
+	var destroyErrors []error
+
 	if err := iamManager.DeleteServiceAccounts(ctx); err != nil {
-		return fmt.Errorf("failed to delete service accounts: %w", err)
+		destroyErrors = append(destroyErrors, fmt.Errorf("failed to delete service accounts: %w", err))
 	}
 
 	if err := iamManager.DeleteOIDCProvider(ctx); err != nil {
-		return fmt.Errorf("failed to delete OIDC provider: %w", err)
+		destroyErrors = append(destroyErrors, fmt.Errorf("failed to delete OIDC provider: %w", err))
 	}
 
 	if err := iamManager.DeleteWorkloadIdentityPool(ctx); err != nil {
-		return fmt.Errorf("failed to delete workload identity pool: %w", err)
+		destroyErrors = append(destroyErrors, fmt.Errorf("failed to delete workload identity pool: %w", err))
 	}
-	return nil
+
+	return errors.Join(destroyErrors...)
 }
 
 func confirmDestroy(infraID, projectID string) bool {
 	fmt.Fprintf(os.Stderr, "This will destroy all IAM resources for infra-id %q in project %q.\n", infraID, projectID)
-	fmt.Fprintf(os.Stderr, "  - 6 Google Service Accounts and their role bindings\n")
+	fmt.Fprintf(os.Stderr, "  - All Google Service Accounts and their role bindings, including the optional ingress-operator account\n")
 	fmt.Fprintf(os.Stderr, "  - OIDC Provider\n")
 	fmt.Fprintf(os.Stderr, "  - Workload Identity Pool\n")
 	fmt.Fprintf(os.Stderr, "\nAre you sure? [y/N]: ")

@@ -20,6 +20,7 @@ type CreateOptions struct {
 	ClusterOIDCJWKSFile string
 	OutputFile          string
 	OIDCIssuerURL       string
+	EnableIngress       bool
 }
 
 type CreateOutput struct {
@@ -49,6 +50,12 @@ func NewCreateCommand(effective *config.Config) *cobra.Command {
   - Workload Identity Pool
   - OIDC Provider
   - 6 Google Service Accounts with IAM roles and WIF bindings
+
+With --enable-ingress, the optional ingress-operator Google Service Account is
+created as well and its email is added to the output under
+serviceAccounts.ingress-op. Passing that output to
+'gcphcpctl cluster create --iam-config-file' enables the cluster Ingress
+capability.
 
 All operations are idempotent and safe to run multiple times.`,
 		Args:         cobra.ExactArgs(1),
@@ -83,6 +90,7 @@ All operations are idempotent and safe to run multiple times.`,
 	cmd.Flags().StringVar(&opts.ClusterOIDCJWKSFile, "oidc-jwks-file", "", "Path to a local JSON file containing OIDC provider's public key in JWKS format")
 	cmd.Flags().StringVar(&opts.OutputFile, "output-file", "", "Path to output JSON file with GSA details (default: stdout)")
 	cmd.Flags().StringVar(&opts.OIDCIssuerURL, "oidc-issuer-url", "", "OIDC issuer URL for WIF provider (defaults to the discovered OIDC endpoint + /{infra-id})")
+	cmd.Flags().BoolVar(&opts.EnableIngress, "enable-ingress", false, "Also create the optional ingress-operator service account, needed to enable the cluster Ingress capability")
 
 	return cmd
 }
@@ -124,6 +132,7 @@ func (o *CreateOptions) CreateIAM(ctx context.Context, logger logr.Logger) (*Cre
 	if o.OIDCIssuerURL != "" {
 		iamManager.SetOIDCIssuerURL(o.OIDCIssuerURL)
 	}
+	iamManager.SetEnableIngress(o.EnableIngress)
 
 	projectNumber, err := iamManager.GetProjectNumber(ctx)
 	if err != nil {
