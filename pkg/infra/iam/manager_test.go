@@ -1,6 +1,7 @@
 package iam
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -763,4 +764,208 @@ func TestCompareJWKS(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeIAMClient records the calls the Manager makes and lets a test inject
+// failures per operation.
+type fakeIAMClient struct {
+	deletedServiceAccounts []string
+	removedRoleMembers     map[string][]string
+	createdServiceAccounts map[string]bool
+	addedRoleMembers       map[string][]string
+	wifBindings            map[string][]string
+	createServiceAccountID string
+
+	removeRolesErr error
+	deleteSAErr    func(resource string) error
+}
+
+func newFakeIAMClient() *fakeIAMClient {
+	return &fakeIAMClient{
+		removedRoleMembers:     map[string][]string{},
+		createdServiceAccounts: map[string]bool{},
+		addedRoleMembers:       map[string][]string{},
+		wifBindings:            map[string][]string{},
+	}
+}
+
+func (f *fakeIAMClient) GetProjectNumber(context.Context) (int64, error) { return 123456789, nil }
+
+func (f *fakeIAMClient) CreateWorkloadIdentityPool(context.Context, string, string, *iamapi.WorkloadIdentityPool) error {
+	return nil
+}
+
+func (f *fakeIAMClient) GetWorkloadIdentityPool(context.Context, string) (*iamapi.WorkloadIdentityPool, error) {
+	return nil, nil
+}
+
+func (f *fakeIAMClient) PatchWorkloadIdentityPool(context.Context, string, *iamapi.WorkloadIdentityPool, string) error {
+	return nil
+}
+
+func (f *fakeIAMClient) UndeleteWorkloadIdentityPool(context.Context, string) error { return nil }
+
+func (f *fakeIAMClient) DeleteWorkloadIdentityPool(context.Context, string) error { return nil }
+
+func (f *fakeIAMClient) CreateWorkloadIdentityProvider(context.Context, string, string, *iamapi.WorkloadIdentityPoolProvider) error {
+	return nil
+}
+
+func (f *fakeIAMClient) GetWorkloadIdentityProvider(context.Context, string) (*iamapi.WorkloadIdentityPoolProvider, error) {
+	return nil, nil
+}
+
+func (f *fakeIAMClient) UpdateWorkloadIdentityProvider(context.Context, string, *iamapi.WorkloadIdentityPoolProvider, string) error {
+	return nil
+}
+
+func (f *fakeIAMClient) UndeleteWorkloadIdentityProvider(context.Context, string) error { return nil }
+
+func (f *fakeIAMClient) DeleteWorkloadIdentityProvider(context.Context, string) error { return nil }
+
+func (f *fakeIAMClient) CreateServiceAccount(_ context.Context, accountID string, _ *iamapi.ServiceAccount) (*iamapi.ServiceAccount, error) {
+	f.createdServiceAccounts[accountID] = true
+	return &iamapi.ServiceAccount{}, nil
+}
+
+func (f *fakeIAMClient) DeleteServiceAccount(_ context.Context, resource string) error {
+	if f.deleteSAErr != nil {
+		if err := f.deleteSAErr(resource); err != nil {
+			return err
+		}
+	}
+	f.deletedServiceAccounts = append(f.deletedServiceAccounts, resource)
+	return nil
+}
+
+func (f *fakeIAMClient) AddProjectIAMRoles(_ context.Context, member string, roles []string) ([]string, error) {
+	f.addedRoleMembers[member] = append(f.addedRoleMembers[member], roles...)
+	return roles, nil
+}
+
+func (f *fakeIAMClient) RemoveProjectIAMRoles(_ context.Context, member string, roles []string) ([]string, error) {
+	if f.removeRolesErr != nil {
+		return nil, f.removeRolesErr
+	}
+	f.removedRoleMembers[member] = append(f.removedRoleMembers[member], roles...)
+	return roles, nil
+}
+
+func (f *fakeIAMClient) AddServiceAccountIAMRoles(_ context.Context, resource, member string, roles []string) ([]string, error) {
+	f.wifBindings[resource] = append(f.wifBindings[resource], member)
+	return roles, nil
+}
+
+func newTestManager(client iamClient, enableIngress bool) *Manager {
+	return &Manager{
+		projectID:     "test-project",
+		projectNumber: "123456789",
+		infraID:       "test-infra",
+		client:        client,
+		logger:        logr.Discard(),
+		enableIngress: enableIngress,
+	}
+}
+
+func TestCreateServiceAccounts(t *testing.T) {
+	t.Run("When ingress is disabled it should not create the ingress account", func(t *testing.T) {
+		client := newFakeIAMClient()
+
+		emails, err := newTestManager(client, false).CreateServiceAccounts(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(emails) != 6 {
+			t.Errorf("expected 6 service account emails, got %d: %v", len(emails), emails)
+		}
+		if _, ok := emails[IngressServiceAccountName]; ok {
+			t.Errorf("expected %s to be absent from the output", IngressServiceAccountName)
+		}
+		if client.createdServiceAccounts["test-infra-"+IngressServiceAccountName] {
+			t.Errorf("expected %s not to be created", IngressServiceAccountName)
+		}
+		if len(client.addedRoleMembers) != 6 {
+			t.Errorf("expected roles for 6 accounts, got %d", len(client.addedRoleMembers))
+		}
+	})
+
+	t.Run("When ingress is enabled it should create the ingress account with its role and WIF binding", func(t *testing.T) {
+		client := newFakeIAMClient()
+
+		emails, err := newTestManager(client, true).CreateServiceAccounts(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(emails) != 7 {
+			t.Fatalf("expected 7 service account emails, got %d", len(emails))
+		}
+		wantEmail := "test-infra-ingress-op@test-project.iam.gserviceaccount.com"
+		if got := emails[IngressServiceAccountName]; got != wantEmail {
+			t.Errorf("expected %s email %q, got %q", IngressServiceAccountName, wantEmail, got)
+		}
+		if !client.createdServiceAccounts["test-infra-ingress-op"] {
+			t.Error("expected the ingress account to be created")
+		}
+		member := "serviceAccount:" + wantEmail
+		if got := client.addedRoleMembers[member]; len(got) != 1 || got[0] != "roles/dns.admin" {
+			t.Errorf("expected roles/dns.admin for %s, got %v", member, got)
+		}
+		wifPrincipal := "principal://iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/test-infra-wi-pool/subject/system:serviceaccount:openshift-ingress-operator:ingress-operator"
+		bindings := client.wifBindings["projects/test-project/serviceAccounts/"+wantEmail]
+		if len(bindings) != 1 || bindings[0] != wifPrincipal {
+			t.Errorf("expected the ingress WIF binding %q, got %v", wifPrincipal, bindings)
+		}
+	})
+}
+
+func TestDeleteServiceAccounts(t *testing.T) {
+	ingressResource := "projects/test-project/serviceAccounts/test-infra-ingress-op@test-project.iam.gserviceaccount.com"
+	ingressMember := "serviceAccount:test-infra-ingress-op@test-project.iam.gserviceaccount.com"
+
+	t.Run("When every account exists it should delete all of them including ingress", func(t *testing.T) {
+		client := newFakeIAMClient()
+
+		if err := newTestManager(client, true).DeleteServiceAccounts(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(client.deletedServiceAccounts) != 7 {
+			t.Fatalf("expected 7 account deletions, got %d: %v", len(client.deletedServiceAccounts), client.deletedServiceAccounts)
+		}
+		if got := client.removedRoleMembers[ingressMember]; len(got) != 1 || got[0] != "roles/dns.admin" {
+			t.Errorf("expected roles/dns.admin removal for the ingress account, got %v", got)
+		}
+	})
+
+	t.Run("When the ingress account and its binding were never created it should succeed", func(t *testing.T) {
+		client := newFakeIAMClient()
+		client.deleteSAErr = func(resource string) error {
+			if resource == ingressResource {
+				return &googleapi.Error{Code: 404, Message: "not found"}
+			}
+			return nil
+		}
+
+		if err := newTestManager(client, false).DeleteServiceAccounts(context.Background()); err != nil {
+			t.Fatalf("expected not-found for the ingress account to be tolerated, got %v", err)
+		}
+		if len(client.deletedServiceAccounts) != 6 {
+			t.Errorf("expected 6 account deletions, got %d", len(client.deletedServiceAccounts))
+		}
+	})
+
+	t.Run("When a role binding removal fails it should report the failure and still delete the account", func(t *testing.T) {
+		client := newFakeIAMClient()
+		client.removeRolesErr = &googleapi.Error{Code: 403, Message: "permission denied"}
+
+		err := newTestManager(client, true).DeleteServiceAccounts(context.Background())
+		if err == nil {
+			t.Fatal("expected a teardown error when role removal fails")
+		}
+		if !strings.Contains(err.Error(), "failed to remove role bindings") {
+			t.Errorf("expected a role-binding error, got %v", err)
+		}
+		if len(client.deletedServiceAccounts) != 7 {
+			t.Errorf("expected accounts to still be deleted, got %d deletions", len(client.deletedServiceAccounts))
+		}
+	})
 }
